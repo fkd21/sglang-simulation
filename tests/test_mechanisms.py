@@ -217,12 +217,12 @@ class TestPolicyMonitor:
         assert monitor.enabled
 
     def test_monitor_disabled_returns_none(self):
-        """Disabled monitor returns None."""
+        """Disabled monitor returns empty list."""
         monitor = PolicyMonitor(policy="never")
         # Create mock instances
         instances = []
         result = monitor.evaluate(instances, current_time=10.0)
-        assert result is None
+        assert result == []
 
     def test_monitor_with_alpha_high(self):
         """Monitor with alpha policy creates switch event when alpha high."""
@@ -246,10 +246,10 @@ class TestPolicyMonitor:
         result = monitor.evaluate(instances, current_time=10.0)
 
         # Should create ROLE_SWITCH event for decode→prefill
-        assert result is not None
-        assert result.event_type == EventType.ROLE_SWITCH
-        assert result.data["instance_id"] == "decode_0"
-        assert result.data["target_role"] == InstanceType.PREFILL
+        assert len(result) == 1
+        assert result[0].event_type == EventType.ROLE_SWITCH
+        assert result[0].data["instance_id"] == "decode_0"
+        assert result[0].data["target_role"] == InstanceType.PREFILL
 
 
 # ---- PolicyController ----

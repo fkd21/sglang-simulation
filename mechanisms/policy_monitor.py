@@ -15,6 +15,7 @@ import argparse
 from simulation.mechanisms.worker_state import WorkerState
 from simulation.mechanisms.policy_alpha_sim import PolicyAlphaSim
 from simulation.mechanisms.policy_v1_sim import PolicyV1Sim
+from simulation.mechanisms.policy_throughput_sim import PolicyThroughputSim
 from simulation.core.event import Event, EventType
 
 if TYPE_CHECKING:
@@ -52,18 +53,23 @@ class PolicyMonitor:
         idle_scrapes: int = 2,
         # Alpha metric params
         slo_target: float = 1.0,
+        # Throughput policy params
+        max_prefill_tokens: int = 8192,
+        max_running_requests: int = 1000,
     ):
         """Initialize policy monitor.
 
         Args:
-            policy: Policy to use ("never", "alpha", "v1")
+            policy: Policy to use ("never", "alpha", "v1", "throughput")
             monitor_interval_s: How often to evaluate policy (seconds)
             slo_target: TTFT SLO target in seconds (for alpha computation)
+            max_prefill_tokens: Max prefill tokens per batch (for throughput policy)
+            max_running_requests: Max concurrent requests per instance (for throughput policy)
             ...: Policy-specific parameters
         """
         self.policy = policy
         self.monitor_interval_s = monitor_interval_s
-        self.enabled = policy in ["alpha", "v1"]
+        self.enabled = policy in ["alpha", "v1", "throughput"]
         self.slo_target = slo_target
 
         # Initialize policy implementation
@@ -100,6 +106,16 @@ class PolicyMonitor:
                 decode_prefill_prealloc_weight=decode_prefill_prealloc_weight,
             )
             self._policy_impl = PolicyV1Sim(args)
+        elif policy == "throughput":
+            args = argparse.Namespace(
+                global_cooldown_s=global_cooldown_s,
+                min_decode=min_decode,
+                min_prefill=min_prefill,
+                idle_scrapes=idle_scrapes,
+                max_prefill_tokens=max_prefill_tokens,
+                max_running_requests=max_running_requests,
+            )
+            self._policy_impl = PolicyThroughputSim(args)
         else:
             self._policy_impl = None
 
@@ -107,18 +123,20 @@ class PolicyMonitor:
         self,
         all_instances: List[SimInstance],
         current_time: float,
-    ) -> Optional[Event]:
-        """Evaluate policy and create ROLE_SWITCH event if needed.
+        interval_metrics: Optional[Dict[str, float]] = None,
+    ) -> List[Event]:
+        """Evaluate policy and create ROLE_SWITCH events if needed.
 
         Args:
             all_instances: All instances (prefill + decode)
             current_time: Current simulation time
+            interval_metrics: Throughput metrics for throughput-based policy
 
         Returns:
-            ROLE_SWITCH event if policy proposes a switch, None otherwise
+            List of ROLE_SWITCH events (empty if no switches proposed)
         """
         if not self.enabled or self._policy_impl is None:
-            return None
+            return []
 
         # Convert instances to WorkerState format
         states = {}
@@ -129,38 +147,69 @@ class PolicyMonitor:
             port_to_instance[worker_state.port] = inst
 
         # Call policy
-        result = self._policy_impl.evaluate(current_time, states)
+        if self.policy == "throughput":
+            result = self._policy_impl.evaluate(
+                current_time, states, interval_metrics=interval_metrics
+            )
+        else:
+            result = self._policy_impl.evaluate(current_time, states)
+
         action = result.get("action", {})
+        events = []
 
-        # If policy proposes switch, create event
+        # Handle single switch proposal (alpha, v1)
         if action.get("kind") == "switch_proposed":
-            chosen_port = action.get("port")
-            target_role_str = action.get("to_role")  # "prefill" or "decode"
+            event = self._create_switch_event(action, port_to_instance, current_time)
+            if event:
+                events.append(event)
 
-            # Find instance by port
-            if chosen_port not in port_to_instance:
-                return None
+        # Handle multi-switch proposal (throughput)
+        elif action.get("kind") == "multi_switch_proposed":
+            for proposal in action.get("proposals", []):
+                event = self._create_switch_event(proposal, port_to_instance, current_time)
+                if event:
+                    events.append(event)
 
-            instance = port_to_instance[chosen_port]
+        return events
 
-            # Create ROLE_SWITCH event
-            from simulation.instances.base_instance import InstanceType
-            target_role = (
-                InstanceType.PREFILL if target_role_str == "prefill"
-                else InstanceType.DECODE
-            )
+    def _create_switch_event(
+        self,
+        action: Dict[str, Any],
+        port_to_instance: Dict[int, SimInstance],
+        current_time: float,
+    ) -> Optional[Event]:
+        """Create a ROLE_SWITCH event from a policy action dict.
 
-            event = Event(
-                timestamp=current_time,
-                event_type=EventType.ROLE_SWITCH,
-                data={
-                    "instance_id": instance.instance_id,
-                    "target_role": target_role,
-                },
-            )
-            return event
+        Args:
+            action: Dict with 'port' and 'to_role' keys
+            port_to_instance: Mapping from port to instance
+            current_time: Current simulation time
 
-        return None
+        Returns:
+            ROLE_SWITCH event, or None if instance not found
+        """
+        chosen_port = action.get("port")
+        target_role_str = action.get("to_role")  # "prefill" or "decode"
+
+        if chosen_port not in port_to_instance:
+            return None
+
+        instance = port_to_instance[chosen_port]
+
+        from simulation.instances.base_instance import InstanceType
+        target_role = (
+            InstanceType.PREFILL if target_role_str == "prefill"
+            else InstanceType.DECODE
+        )
+
+        return Event(
+            timestamp=current_time,
+            event_type=EventType.ROLE_SWITCH,
+            data={
+                "instance_id": instance.instance_id,
+                "target_role": target_role,
+            },
+        )
 
     def _instance_to_port(self, instance: SimInstance) -> int:
         """Map instance ID to stable port number."""

@@ -1,11 +1,13 @@
 """Systematic experiments comparing partial offload vs baseline.
 
-Runs 5 experiment groups:
+Runs 6 experiment groups:
 1. SLO target sensitivity
 2. Instance configuration scaling
 3. Context length distribution
 4. LP window size
 5. Load level (arrival rate)
+6. 8-instance P:D ratio sweep (1P7D through 7P1D)
+7. Switching + offload interaction at 1P7D (3 policies x 2 offload modes)
 
 Results saved as JSON to simulation/experiments/results/.
 """
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 # Add project root to path
 _project_root = Path(__file__).resolve().parent.parent.parent
@@ -36,6 +39,9 @@ from simulation.core.engine import SimulationEngine
 # Paths
 # ---------------------------------------------------------------------------
 AZURE_TRACE = Path(__file__).resolve().parent.parent / "azure_code_8000.csv"
+AZURE_TRACE_500 = Path(__file__).resolve().parent.parent / "azure_code_500.csv"
+AZURE_TRACE_32000 = Path(__file__).resolve().parent.parent / "azure_code_32000.csv"
+AZURE_CODE_WEEK = Path(__file__).resolve().parent.parent / "AzureLLMInferenceTrace_code_1week.csv"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
@@ -147,6 +153,8 @@ def _run_one(args: Tuple) -> Dict[str, Any]:
         "slo_target": config.slo_target,
         "lp_max_window_size": config.lp_max_window_size,
         "max_prefill_tokens": config.max_prefill_tokens,
+        "enable_switching": config.enable_switching,
+        "switch_policy": config.switch_policy,
     }
     d.update(extras)
     return d
@@ -387,12 +395,123 @@ def experiment_load_level() -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Experiment 6: 8-Instance P:D Ratio Sweep
+# ---------------------------------------------------------------------------
+
+def experiment_pd_ratio_8instances() -> List[Dict]:
+    """Sweep P:D ratio with total 8 instances (1P7D..7P1D), baseline vs offload."""
+    print("\n=== Experiment 6: 8-Instance P:D Ratio Sweep ===")
+    trace = str(AZURE_TRACE_500)
+    configs = [(1, 7), (2, 6), (3, 5), (4, 4), (5, 3), (6, 2), (7, 1)]
+    tasks = []
+
+    for p, d in configs:
+        # Baseline
+        config = SimConfig(
+            trace_path=trace,
+            num_prefill_instances=p,
+            num_decode_instances=d,
+            enable_dynamic_lp=False,
+        )
+        tasks.append((config, f"{p}P{d}D_baseline", {"pd_config": f"{p}P{d}D", "mode": "baseline", "total_instances": 8}))
+
+        # Partial offload
+        config = SimConfig(
+            trace_path=trace,
+            num_prefill_instances=p,
+            num_decode_instances=d,
+            enable_dynamic_lp=True,
+            slo_target=1.0,
+        )
+        tasks.append((config, f"{p}P{d}D_offload", {"pd_config": f"{p}P{d}D", "mode": "offload", "total_instances": 8}))
+
+    return run_parallel(tasks)
+
+
+# ---------------------------------------------------------------------------
+# Experiment 7: Switching + Offload Interaction at 1P7D
+# ---------------------------------------------------------------------------
+
+def _ensure_azure_32000() -> Path:
+    """Extract first 32000 rows from the week-long Azure code trace if needed."""
+    if AZURE_TRACE_32000.exists():
+        # Quick check row count
+        with open(AZURE_TRACE_32000) as f:
+            n = sum(1 for _ in f) - 1  # minus header
+        if n >= 32000:
+            return AZURE_TRACE_32000
+
+    if not AZURE_CODE_WEEK.exists():
+        raise FileNotFoundError(
+            f"Week-long Azure trace not found at {AZURE_CODE_WEEK}. "
+            "Please place the file there or create azure_code_32000.csv manually."
+        )
+
+    print(f"  Extracting first 32000 rows from {AZURE_CODE_WEEK}...")
+    df = pd.read_csv(AZURE_CODE_WEEK, nrows=32000)
+    df.to_csv(AZURE_TRACE_32000, index=False)
+    print(f"  Saved {len(df)} rows to {AZURE_TRACE_32000}")
+    return AZURE_TRACE_32000
+
+
+def experiment_switching_offload_1p7d() -> List[Dict]:
+    """Test 3 switching policies x 2 offload modes at 1P7D with 32K Azure code requests."""
+    print("\n=== Experiment 7: Switching + Offload at 1P7D ===")
+    trace = str(_ensure_azure_32000())
+
+    policies = [
+        ("none", False, "never"),
+        ("alpha", True, "alpha"),
+        ("v1", True, "v1"),
+    ]
+    tasks = []
+
+    for policy_name, enable_sw, sw_policy in policies:
+        # Without offload
+        config = SimConfig(
+            trace_path=trace,
+            num_prefill_instances=1,
+            num_decode_instances=7,
+            enable_switching=enable_sw,
+            switch_policy=sw_policy,
+            enable_dynamic_lp=False,
+        )
+        tasks.append((
+            config,
+            f"{policy_name}_no_offload",
+            {"policy": policy_name, "offload_enabled": False},
+        ))
+
+        # With offload
+        config = SimConfig(
+            trace_path=trace,
+            num_prefill_instances=1,
+            num_decode_instances=7,
+            enable_switching=enable_sw,
+            switch_policy=sw_policy,
+            enable_dynamic_lp=True,
+            slo_target=1.0,
+            lp_max_window_size=5,
+        )
+        tasks.append((
+            config,
+            f"{policy_name}_offload",
+            {"policy": policy_name, "offload_enabled": True},
+        ))
+
+    return run_parallel(tasks)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     if not AZURE_TRACE.exists():
         print(f"Error: Azure trace not found at {AZURE_TRACE}")
+        sys.exit(1)
+    if not AZURE_TRACE_500.exists():
+        print(f"Error: Azure trace not found at {AZURE_TRACE_500}")
         sys.exit(1)
 
     print(f"Results will be saved to {RESULTS_DIR}")
@@ -420,6 +539,14 @@ def main():
     r5 = experiment_load_level()
     save_experiment("exp5_load_level", r5)
     all_results["exp5_load_level"] = r5
+
+    r6 = experiment_pd_ratio_8instances()
+    save_experiment("exp6_pd_ratio_8instances", r6)
+    all_results["exp6_pd_ratio_8instances"] = r6
+
+    r7 = experiment_switching_offload_1p7d()
+    save_experiment("exp7_switching_offload_1p7d", r7)
+    all_results["exp7_switching_offload_1p7d"] = r7
 
     # Save combined results
     combined_path = RESULTS_DIR / "all_experiments.json"

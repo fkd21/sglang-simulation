@@ -79,7 +79,17 @@ class SimulationEngine:
             min_decode=config.min_decode_instances,
             idle_scrapes=config.idle_scrapes,
             slo_target=config.slo_target,
+            # Throughput policy params
+            max_prefill_tokens=config.max_prefill_tokens,
+            max_running_requests=config.max_running_requests,
         )
+
+        # Throughput tracking for throughput-based policy
+        self._interval_prefill_tokens = 0
+        self._interval_decode_tokens = 0
+        self._interval_decode_computed_token_sum = 0
+        self._interval_decode_batch_count = 0
+        self._interval_start_time = 0.0
 
         # Iteration logger (optional)
         self.iteration_logger = None
@@ -291,11 +301,20 @@ class SimulationEngine:
 
         return available - reserved_tokens
 
-    def _select_best_decode_instance(self) -> DecodeInstance:
-        """Select decode instance with most allocatable tokens (least-loaded)."""
+    def _select_best_decode_instance(self):
+        """Select decode instance with most allocatable tokens (least-loaded).
+
+        Skips instances that are not accepting requests (e.g. draining during
+        role switch) to prevent routing new work to switching instances.
+
+        Returns:
+            Best decode instance, or None if all are draining.
+        """
         best = None
         best_tokens = -float("inf")
         for inst in self.instance_manager.decode_instances:
+            if not inst.accepting_requests:
+                continue
             tokens = self._decode_allocatable_tokens(inst)
             if tokens > best_tokens:
                 best_tokens = tokens
@@ -323,14 +342,19 @@ class SimulationEngine:
             if req.assigned_decode_instance is not None:
                 decode_instance = next(
                     (inst for inst in self.instance_manager.decode_instances
-                     if inst.instance_id == req.assigned_decode_instance),
+                     if inst.instance_id == req.assigned_decode_instance
+                     and inst.accepting_requests),
                     None,
                 )
                 if decode_instance is None:
-                    # Pinned instance switched roles; fall back
+                    # Pinned instance switched roles or draining; fall back
                     decode_instance = self._select_best_decode_instance()
             else:
                 decode_instance = self._select_best_decode_instance()
+
+            # No available decode instance (all draining)
+            if decode_instance is None:
+                break
 
             # Check decode capacity
             allocatable = self._decode_allocatable_tokens(decode_instance)
@@ -446,6 +470,9 @@ class SimulationEngine:
         instance.current_batch = None
 
         self.metrics_collector.record_prefill_busy(batch.estimated_duration)
+
+        # Accumulate prefill tokens for throughput tracking
+        self._interval_prefill_tokens += batch.total_prefill_tokens
 
         # Check which requests are still being chunked
         scheduler = self.prefill_schedulers[instance.instance_id]
@@ -828,6 +855,11 @@ class SimulationEngine:
         instance.current_batch = None
 
         self.metrics_collector.record_decode_busy(batch.estimated_duration)
+
+        # Accumulate decode tokens for throughput tracking
+        self._interval_decode_tokens += batch.decode_batch_size
+        self._interval_decode_computed_token_sum += batch.decode_computed_token_sum
+        self._interval_decode_batch_count += 1
 
         events = []
 
@@ -1516,21 +1548,51 @@ class SimulationEngine:
     def _handle_monitor_eval(self, event: Event) -> List[Event]:
         """Handle periodic policy monitor evaluation.
 
+        Computes interval throughput metrics and passes them to the policy
+        monitor for throughput-based switching decisions.
+
         Args:
             event: MONITOR_EVAL event
 
         Returns:
-            List of events (may include ROLE_SWITCH event and next MONITOR_EVAL)
+            List of events (may include ROLE_SWITCH events and next MONITOR_EVAL)
         """
         all_instances = (
             self.instance_manager.prefill_instances +
             self.instance_manager.decode_instances
         )
 
-        # Evaluate policy
-        switch_event = self.policy_monitor.evaluate(
+        # Compute interval metrics for throughput-based policy
+        interval_duration = self.current_time - self._interval_start_time
+        interval_metrics = None
+        if interval_duration > 0:
+            avg_dcts = (
+                self._interval_decode_computed_token_sum / self._interval_decode_batch_count
+                if self._interval_decode_batch_count > 0 else 0.0
+            )
+            avg_dbs = (
+                self._interval_decode_tokens / self._interval_decode_batch_count
+                if self._interval_decode_batch_count > 0 else 0.0
+            )
+            interval_metrics = {
+                "input_throughput": self._interval_prefill_tokens / interval_duration,
+                "output_throughput": self._interval_decode_tokens / interval_duration,
+                "avg_decode_computed_token_sum": avg_dcts,
+                "avg_decode_batch_size": avg_dbs,
+            }
+
+        # Reset counters for next interval
+        self._interval_prefill_tokens = 0
+        self._interval_decode_tokens = 0
+        self._interval_decode_computed_token_sum = 0
+        self._interval_decode_batch_count = 0
+        self._interval_start_time = self.current_time
+
+        # Evaluate policy (returns List[Event])
+        switch_events = self.policy_monitor.evaluate(
             all_instances=all_instances,
             current_time=self.current_time,
+            interval_metrics=interval_metrics,
         )
 
         # Schedule next monitor evaluation
@@ -1541,6 +1603,5 @@ class SimulationEngine:
         )
 
         events = [next_eval_event]
-        if switch_event:
-            events.append(switch_event)
+        events.extend(switch_events)
         return events

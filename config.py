@@ -40,7 +40,7 @@ class SimConfig:
     lp_max_window_size: int = 5  # Max requests in LP sliding window
     enable_continuation: bool = False
     enable_switching: bool = False
-    switch_policy: str = "never"  # "never", "alpha", "v1"
+    switch_policy: str = "never"  # "never", "alpha", "v1", "throughput"
     switch_schedule: List[Dict] = field(default_factory=list)  # Manual switch schedule
     switch_min_blocking_time: float = 5.0  # Minimum blocking period after drain
 

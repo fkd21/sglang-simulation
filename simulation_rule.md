@@ -48,10 +48,10 @@ Simulation mode:
 
 2.Use the following regression model to estimate one-iteration mixed-batch inference time:
 
-t_inference = 0.009076
-            + 7.063e-5 * total_prefill_tokens
-            + 5.623e-5 * decode_batch_size
-            + 6.926e-8 * decode_computed_token_sum
+t_inference = 0.014654
+         + 6.944e-5 * total_prefill_tokens
+         + 6.024e-5 * decode_batch_size
+         + 8.463e-8 * decode_computed_token_sum
 
 Where:
 - total_prefill_tokens: total number of prefill tokens in the current batch
