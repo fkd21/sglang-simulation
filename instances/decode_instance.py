@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import List
 
-from simulation.instances.base_instance import InstanceType, SimInstance
-from simulation.request.request import SimReq
+from instances.base_instance import InstanceType, SimInstance
+from request.request import SimReq
 
 
 class DecodeInstance(SimInstance):

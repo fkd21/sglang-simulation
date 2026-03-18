@@ -1,8 +1,8 @@
 """Test batch operations and metrics."""
 
 import pytest
-from simulation.request.request import SimReq
-from simulation.request.batch import SimBatch, ForwardMode
+from request.request import SimReq
+from request.batch import SimBatch, ForwardMode
 
 
 class TestSimBatch:

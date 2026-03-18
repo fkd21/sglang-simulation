@@ -6,26 +6,26 @@ import heapq
 import random
 from typing import List
 
-from simulation.config import SimConfig
-from simulation.core.event import Event, EventType
-from simulation.instances.base_instance import InstanceType
-from simulation.instances.decode_instance import DecodeInstance
-from simulation.instances.instance_manager import InstanceManager
-from simulation.instances.prefill_instance import PrefillInstance
-from simulation.metrics.metrics_collector import MetricsCollector, SimulationResults
-from simulation.policy.policy_controller import PolicyController
-from simulation.mechanisms.policy_monitor import PolicyMonitor
-from simulation.request.batch import ForwardMode, SimBatch
-from simulation.request.request import RequestStage, SimReq
-from simulation.results.iteration_logger import IterationLogger
-from simulation.results.request_trace_logger import RequestTraceLogger
-from simulation.scheduling.prefill_scheduler import PrefillScheduler
-from simulation.scheduling.simple_scheduler import SimpleScheduler
-from simulation.utils.profiling_formulas import (
+from config import SimConfig
+from core.event import Event, EventType
+from instances.base_instance import InstanceType
+from instances.decode_instance import DecodeInstance
+from instances.instance_manager import InstanceManager
+from instances.prefill_instance import PrefillInstance
+from metrics.metrics_collector import MetricsCollector, SimulationResults
+from policy.policy_controller import PolicyController
+from mechanisms.policy_monitor import PolicyMonitor
+from request.batch import ForwardMode, SimBatch
+from request.request import RequestStage, SimReq
+from results.iteration_logger import IterationLogger
+from results.request_trace_logger import RequestTraceLogger
+from scheduling.prefill_scheduler import PrefillScheduler
+from scheduling.simple_scheduler import SimpleScheduler
+from utils.profiling_formulas import (
     compute_inference_time,
     compute_kv_transfer_time,
 )
-from simulation.workload.trace_loader import WorkloadDriver
+from workload.trace_loader import WorkloadDriver
 
 
 class SimulationEngine:

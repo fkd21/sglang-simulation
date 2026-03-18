@@ -1,7 +1,7 @@
 """Test request lifecycle and state transitions."""
 
 import pytest
-from simulation.request.request import SimReq, RequestStage
+from request.request import SimReq, RequestStage
 
 
 class TestSimReq:

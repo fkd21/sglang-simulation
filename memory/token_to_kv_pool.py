@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from simulation.utils.constants import TOTAL_KV_CACHE_TOKENS
+from utils.constants import TOTAL_KV_CACHE_TOKENS
 
 
 class SimTokenToKVPool:

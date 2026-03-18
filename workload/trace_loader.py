@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
-from simulation.request.request import SimReq
+from request.request import SimReq
 
 
 class JsonlTraceLoader:

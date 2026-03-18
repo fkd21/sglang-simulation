@@ -7,20 +7,20 @@ import tempfile
 
 import pytest
 
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
-from simulation.core.event import Event, EventType
-from simulation.instances.base_instance import InstanceType
-from simulation.mechanisms.policy_monitor import PolicyMonitor
-from simulation.mechanisms.policy_throughput_sim import (
+from config import SimConfig
+from core.engine import SimulationEngine
+from core.event import Event, EventType
+from instances.base_instance import InstanceType
+from mechanisms.policy_monitor import PolicyMonitor
+from mechanisms.policy_throughput_sim import (
     DECODE_BS_SLOPE,
     DECODE_TOKEN_SUM_SLOPE,
     INTERCEPT,
     PREFILL_SLOPE,
     PolicyThroughputSim,
 )
-from simulation.mechanisms.worker_state import WorkerState
-from simulation.utils.constants import TOTAL_KV_CACHE_TOKENS
+from mechanisms.worker_state import WorkerState
+from utils.constants import TOTAL_KV_CACHE_TOKENS
 
 
 # ---- Fixtures ----

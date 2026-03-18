@@ -1,18 +1,18 @@
 """Tests for the optimization mechanisms and PolicyController."""
 
 import pytest
-from simulation.mechanisms.partial_offload import DynamicBetaSolver
-from simulation.mechanisms.decode_continuation import DecodeContinuation
-from simulation.mechanisms.role_switching import RoleSwitcher
-from simulation.mechanisms.policy_monitor import PolicyMonitor
-from simulation.policy.policy_controller import PolicyController
-from simulation.config import SimConfig
-from simulation.instances.base_instance import InstanceType, SimInstance
-from simulation.instances.prefill_instance import PrefillInstance
-from simulation.instances.decode_instance import DecodeInstance
-from simulation.request.request import SimReq
-from simulation.request.batch import SimBatch
-from simulation.core.event import EventType
+from mechanisms.partial_offload import DynamicBetaSolver
+from mechanisms.decode_continuation import DecodeContinuation
+from mechanisms.role_switching import RoleSwitcher
+from mechanisms.policy_monitor import PolicyMonitor
+from policy.policy_controller import PolicyController
+from config import SimConfig
+from instances.base_instance import InstanceType, SimInstance
+from instances.prefill_instance import PrefillInstance
+from instances.decode_instance import DecodeInstance
+from request.request import SimReq
+from request.batch import SimBatch
+from core.event import EventType
 
 
 def make_req(rid, context_tokens, generated_tokens=50):

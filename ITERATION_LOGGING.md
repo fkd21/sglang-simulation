@@ -14,11 +14,11 @@ The iteration logging system records detailed statistics for **every batch execu
 ### Enable Logging
 
 ```python
-from simulation.core.engine import SimulationEngine
-from simulation.config import SimConfig
+from core.engine import SimulationEngine
+from config import SimConfig
 
 config = SimConfig(
-    trace_path="simulation/AzureLLMInferenceTrace_code.csv",
+    trace_path="AzureLLMInferenceTrace_code.csv",
     num_prefill_instances=4,
     num_decode_instances=4
 )
@@ -30,7 +30,7 @@ results = engine.run()
 
 ### Output Files
 
-Results are saved to `simulation/result/` directory:
+Results are saved to `result/` directory:
 
 - **`{run_name}_prefill.jsonl`** - All prefill batch executions
 - **`{run_name}_decode.jsonl`** - All decode batch executions
@@ -102,14 +102,14 @@ Each line in the JSONL file contains:
 import json
 
 # Count total batches
-with open('simulation/result/4P4D_prefill.jsonl', 'r') as f:
+with open('result/4P4D_prefill.jsonl', 'r') as f:
     total_batches = sum(1 for _ in f)
 print(f"Total prefill batches: {total_batches}")
 
 # Calculate average batch size
 total_reqs = 0
 total_batches = 0
-with open('simulation/result/4P4D_prefill.jsonl', 'r') as f:
+with open('result/4P4D_prefill.jsonl', 'r') as f:
     for line in f:
         record = json.loads(line)
         total_reqs += record['batch_size']
@@ -127,7 +127,7 @@ import json
 
 # Load into DataFrame
 records = []
-with open('simulation/result/4P4D_prefill.jsonl', 'r') as f:
+with open('result/4P4D_prefill.jsonl', 'r') as f:
     records = [json.loads(line) for line in f]
 
 df = pd.DataFrame(records)
@@ -152,7 +152,7 @@ import json
 # Track a specific request through iterations
 target_rid = "req_1234"
 
-with open('simulation/result/4P4D_prefill.jsonl', 'r') as f:
+with open('result/4P4D_prefill.jsonl', 'r') as f:
     for line in f:
         rec = json.loads(line)
         for req in rec['requests']:
@@ -170,7 +170,7 @@ import json
 total_matched = 0
 total_extend = 0
 
-with open('simulation/result/4P4D_prefill.jsonl', 'r') as f:
+with open('result/4P4D_prefill.jsonl', 'r') as f:
     for line in f:
         rec = json.loads(line)
         for req in rec['requests']:
@@ -184,9 +184,9 @@ print(f"Prefix cache hit rate: {hit_rate:.1f}%")
 ## Implementation Details
 
 ### Location
-- **Logger class:** [simulation/results/iteration_logger.py](simulation/results/iteration_logger.py)
-- **Integration:** [simulation/core/engine.py](simulation/core/engine.py)
-- **Output directory:** `simulation/result/`
+- **Logger class:** [results/iteration_logger.py](results/iteration_logger.py)
+- **Integration:** [core/engine.py](core/engine.py)
+- **Output directory:** `result/`
 
 ### Logging Points
 Batches are logged in two places:
@@ -243,7 +243,7 @@ for line in open('result/4P4D_prefill.jsonl'):
 
 ```
 IterationLogger initialized:
-  Output dir: simulation/result
+  Output dir: result
   Prefill log: 4P4D_prefill.jsonl
   Decode log: 4P4D_decode.jsonl
 
@@ -255,8 +255,8 @@ IterationLogger Summary:
   Total iterations: 12345
   Prefill iterations: 6789
   Decode iterations: 5556
-  Prefill log: simulation/result/4P4D_prefill.jsonl
-  Decode log: simulation/result/4P4D_decode.jsonl
+  Prefill log: result/4P4D_prefill.jsonl
+  Decode log: result/4P4D_decode.jsonl
 ```
 
 ## Future Enhancements

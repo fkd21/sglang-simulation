@@ -2,7 +2,7 @@
 
 import pytest
 import heapq
-from simulation.core.event import Event, EventType
+from core.event import Event, EventType
 
 
 class TestEventOrdering:

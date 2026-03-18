@@ -7,7 +7,7 @@ This is adapted from policy_v1.py with local imports (worker_state module instea
 import argparse
 from typing import Any, Dict, List
 
-from simulation.mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
+from mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
 
 
 class PolicyV1Sim(object):

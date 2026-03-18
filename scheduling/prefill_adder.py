@@ -8,10 +8,10 @@ from __future__ import annotations
 from enum import Enum, auto
 from typing import List, Optional
 
-from simulation.memory.radix_cache import SimRadixCache
-from simulation.memory.token_to_kv_pool import SimTokenToKVPool
-from simulation.request.batch import SimBatch
-from simulation.request.request import SimReq
+from memory.radix_cache import SimRadixCache
+from memory.token_to_kv_pool import SimTokenToKVPool
+from request.batch import SimBatch
+from request.request import SimReq
 
 # Cap the estimated max_new_tokens to prevent over-conservative budgeting.
 # Mirrors CLIP_MAX_NEW_TOKENS in sglang.srt.managers.schedule_policy.

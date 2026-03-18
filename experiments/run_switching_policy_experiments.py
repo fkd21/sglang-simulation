@@ -6,7 +6,7 @@ Runs 4 core experiment groups:
 3. Load level sensitivity (varying arrival rates) on synthetic trace
 4. Switching + offload interaction (test combinations)
 
-Results saved as JSON to simulation/experiments/results/.
+Results saved as JSON to experiments/results/.
 """
 
 from __future__ import annotations
@@ -25,11 +25,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 # Add project root to path
-_project_root = Path(__file__).resolve().parent.parent.parent
+_project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
+from config import SimConfig
+from core.engine import SimulationEngine
 
 
 # ---------------------------------------------------------------------------

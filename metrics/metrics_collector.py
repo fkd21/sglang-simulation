@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from simulation.request.request import SimReq
+from request.request import SimReq
 
 
 @dataclass

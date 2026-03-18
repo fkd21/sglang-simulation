@@ -1,13 +1,13 @@
 """Tests for chunked prefill in PrefillAdder and PrefillScheduler."""
 
 import pytest
-from simulation.scheduling.prefill_adder import SimPrefillAdder, AddReqResult
-from simulation.scheduling.prefill_scheduler import PrefillScheduler
-from simulation.memory.radix_cache import SimRadixCache
-from simulation.memory.token_to_kv_pool import SimTokenToKVPool
-from simulation.request.batch import SimBatch, ForwardMode
-from simulation.request.request import SimReq, RequestStage
-from simulation.instances.prefill_instance import PrefillInstance
+from scheduling.prefill_adder import SimPrefillAdder, AddReqResult
+from scheduling.prefill_scheduler import PrefillScheduler
+from memory.radix_cache import SimRadixCache
+from memory.token_to_kv_pool import SimTokenToKVPool
+from request.batch import SimBatch, ForwardMode
+from request.request import SimReq, RequestStage
+from instances.prefill_instance import PrefillInstance
 
 
 def make_req(rid, context_tokens, generated_tokens=10):

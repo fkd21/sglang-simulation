@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List
 
-from simulation.request.request import SimReq
-from simulation.utils.profiling_formulas import compute_inference_time
+from request.request import SimReq
+from utils.profiling_formulas import compute_inference_time
 
 
 class ForwardMode(Enum):

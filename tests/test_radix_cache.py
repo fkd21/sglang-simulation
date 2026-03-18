@@ -1,7 +1,7 @@
 """Test radix cache prefix matching."""
 
 import pytest
-from simulation.memory.radix_cache import SimRadixCache, SimTreeNode
+from memory.radix_cache import SimRadixCache, SimTreeNode
 
 
 class TestSimTreeNode:

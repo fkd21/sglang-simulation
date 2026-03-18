@@ -12,14 +12,14 @@ import math
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import argparse
 
-from simulation.mechanisms.worker_state import WorkerState
-from simulation.mechanisms.policy_alpha_sim import PolicyAlphaSim
-from simulation.mechanisms.policy_v1_sim import PolicyV1Sim
-from simulation.mechanisms.policy_throughput_sim import PolicyThroughputSim
-from simulation.core.event import Event, EventType
+from mechanisms.worker_state import WorkerState
+from mechanisms.policy_alpha_sim import PolicyAlphaSim
+from mechanisms.policy_v1_sim import PolicyV1Sim
+from mechanisms.policy_throughput_sim import PolicyThroughputSim
+from core.event import Event, EventType
 
 if TYPE_CHECKING:
-    from simulation.instances.base_instance import SimInstance
+    from instances.base_instance import SimInstance
 
 
 class PolicyMonitor:
@@ -196,7 +196,7 @@ class PolicyMonitor:
 
         instance = port_to_instance[chosen_port]
 
-        from simulation.instances.base_instance import InstanceType
+        from instances.base_instance import InstanceType
         target_role = (
             InstanceType.PREFILL if target_role_str == "prefill"
             else InstanceType.DECODE
@@ -219,7 +219,7 @@ class PolicyMonitor:
         self, instance: SimInstance, current_time: float
     ) -> WorkerState:
         """Convert SimInstance to WorkerState."""
-        from simulation.instances.base_instance import InstanceType
+        from instances.base_instance import InstanceType
 
         port = self._instance_to_port(instance)
         role = "prefill" if instance.instance_type == InstanceType.PREFILL else "decode"

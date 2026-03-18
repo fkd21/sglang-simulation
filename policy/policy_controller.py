@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence, Tuple
 
-from simulation.config import SimConfig
-from simulation.instances.base_instance import InstanceType
-from simulation.mechanisms.decode_continuation import DecodeContinuation
-from simulation.mechanisms.partial_offload import DynamicBetaSolver
-from simulation.mechanisms.role_switching import RoleSwitcher
-from simulation.request.request import SimReq
+from config import SimConfig
+from instances.base_instance import InstanceType
+from mechanisms.decode_continuation import DecodeContinuation
+from mechanisms.partial_offload import DynamicBetaSolver
+from mechanisms.role_switching import RoleSwitcher
+from request.request import SimReq
 
 
 class PolicyController:

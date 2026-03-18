@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from simulation.instances.base_instance import InstanceType
+from instances.base_instance import InstanceType
 
 
 class RoleSwitcher:

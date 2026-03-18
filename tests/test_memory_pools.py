@@ -1,8 +1,8 @@
 """Test memory pool implementations."""
 
 import pytest
-from simulation.memory.token_to_kv_pool import SimTokenToKVPool
-from simulation.memory.req_to_token_pool import SimReqToTokenPool
+from memory.token_to_kv_pool import SimTokenToKVPool
+from memory.req_to_token_pool import SimReqToTokenPool
 
 
 class TestTokenToKVPool:

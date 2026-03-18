@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from simulation.utils.constants import DEFAULT_MAX_RUNNING_REQUESTS
+from utils.constants import DEFAULT_MAX_RUNNING_REQUESTS
 
 
 class SimReqToTokenPool:

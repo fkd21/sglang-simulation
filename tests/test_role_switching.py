@@ -1,13 +1,13 @@
 """Tests for role switching mechanism."""
 
 import pytest
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
-from simulation.core.event import Event, EventType
-from simulation.instances.base_instance import InstanceType
-from simulation.instances.prefill_instance import PrefillInstance
-from simulation.instances.decode_instance import DecodeInstance
-from simulation.request.request import SimReq
+from config import SimConfig
+from core.engine import SimulationEngine
+from core.event import Event, EventType
+from instances.base_instance import InstanceType
+from instances.prefill_instance import PrefillInstance
+from instances.decode_instance import DecodeInstance
+from request.request import SimReq
 import tempfile
 import os
 
@@ -165,7 +165,7 @@ def test_no_accept_during_drain(simple_trace_file):
 
 def test_select_instance_for_migrated():
     """Test selecting instance for migrated request."""
-    from simulation.instances.instance_manager import InstanceManager
+    from instances.instance_manager import InstanceManager
 
     manager = InstanceManager(num_prefill=3, num_decode=3)
 
@@ -272,7 +272,7 @@ def test_migration_priority_insertion(simple_trace_file):
 
 def test_metrics_record_switch():
     """Test that metrics correctly record switch events."""
-    from simulation.metrics.metrics_collector import MetricsCollector
+    from metrics.metrics_collector import MetricsCollector
 
     collector = MetricsCollector()
 

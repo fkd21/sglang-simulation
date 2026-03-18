@@ -81,16 +81,16 @@ Tests PrefillAdder for batch scheduling:
 
 ```bash
 # Run all tests
-python -m pytest simulation/tests/ -v
+python -m pytest tests/ -v
 
 # Run specific test file
-python -m pytest simulation/tests/test_profiling_formulas.py -v
+python -m pytest tests/test_profiling_formulas.py -v
 
 # Run with coverage
-python -m pytest simulation/tests/ --cov=simulation --cov-report=html
+python -m pytest tests/ --cov --cov-report=html
 
 # Run tests matching a pattern
-python -m pytest simulation/tests/ -k "test_sla" -v
+python -m pytest tests/ -k "test_sla" -v
 ```
 
 ## Test Results Summary

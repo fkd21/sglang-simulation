@@ -9,9 +9,9 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Tuple
 
-from simulation.instances.base_instance import SimInstance
-from simulation.request.batch import ForwardMode, SimBatch
-from simulation.request.request import RequestStage, SimReq
+from instances.base_instance import SimInstance
+from request.batch import ForwardMode, SimBatch
+from request.request import RequestStage, SimReq
 
 logger = logging.getLogger(__name__)
 

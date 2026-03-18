@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from simulation.instances.base_instance import SimInstance
-from simulation.request.batch import ForwardMode, SimBatch
-from simulation.request.request import RequestStage, SimReq
-from simulation.scheduling.prefill_adder import AddReqResult, SimPrefillAdder
-from simulation.scheduling.schedule_policy import SimSchedulePolicy
+from instances.base_instance import SimInstance
+from request.batch import ForwardMode, SimBatch
+from request.request import RequestStage, SimReq
+from scheduling.prefill_adder import AddReqResult, SimPrefillAdder
+from scheduling.schedule_policy import SimSchedulePolicy
 
 
 class PrefillScheduler:

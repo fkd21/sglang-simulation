@@ -8,8 +8,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import List
 
-from simulation.memory.radix_cache import SimRadixCache
-from simulation.request.request import SimReq
+from memory.radix_cache import SimRadixCache
+from request.request import SimReq
 
 
 class PolicyType(Enum):

@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from scipy.optimize import minimize
 
-from simulation.request.request import SimReq
+from request.request import SimReq
 
 MAX_SOLVER_ITER = 64
 BETA_THRESHOLD = 0.01  # Betas below this are zeroed out

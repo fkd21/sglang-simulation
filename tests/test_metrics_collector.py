@@ -1,8 +1,8 @@
 """Test metrics collection and SLA calculation."""
 
 import pytest
-from simulation.metrics.metrics_collector import MetricsCollector
-from simulation.request.request import SimReq
+from metrics.metrics_collector import MetricsCollector
+from request.request import SimReq
 
 
 class TestMetricsCollector:

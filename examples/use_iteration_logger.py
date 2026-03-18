@@ -5,15 +5,15 @@ This example shows how to enable and analyze per-iteration statistics.
 
 import json
 from pathlib import Path
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
+from config import SimConfig
+from core.engine import SimulationEngine
 
 
 def main():
     """Run simulation with iteration logging enabled."""
 
     # Configuration
-    trace_path = Path("simulation/AzureLLMInferenceTrace_code.csv")
+    trace_path = Path("AzureLLMInferenceTrace_code.csv")
 
     config = SimConfig(
         trace_path=str(trace_path),
@@ -47,12 +47,12 @@ def main():
     print("="*80)
 
     # Read prefill log
-    prefill_log = Path("simulation/result/2P2D_prefill.jsonl")
+    prefill_log = Path("result/2P2D_prefill.jsonl")
     if prefill_log.exists():
         analyze_prefill_log(prefill_log)
 
     # Read decode log
-    decode_log = Path("simulation/result/2P2D_decode.jsonl")
+    decode_log = Path("result/2P2D_decode.jsonl")
     if decode_log.exists():
         analyze_decode_log(decode_log)
 

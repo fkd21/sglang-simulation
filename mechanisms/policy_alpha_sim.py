@@ -9,7 +9,7 @@ This is adapted from policy_alpha.py with:
 import argparse
 from typing import Any, Dict, List
 
-from simulation.mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
+from mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
 
 
 class PolicyAlphaSim(object):

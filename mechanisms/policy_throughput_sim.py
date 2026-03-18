@@ -9,8 +9,8 @@ derived from the profiling formula.
 import argparse
 from typing import Any, Dict, List, Optional
 
-from simulation.mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
-from simulation.utils.constants import TOTAL_KV_CACHE_TOKENS
+from mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
+from utils.constants import TOTAL_KV_CACHE_TOKENS
 
 # Profiling formula constants
 INTERCEPT = 0.014654

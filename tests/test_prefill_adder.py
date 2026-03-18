@@ -1,11 +1,11 @@
 """Test PrefillAdder admission control."""
 
 import pytest
-from simulation.scheduling.prefill_adder import SimPrefillAdder, AddReqResult
-from simulation.memory.radix_cache import SimRadixCache
-from simulation.memory.token_to_kv_pool import SimTokenToKVPool
-from simulation.request.batch import SimBatch, ForwardMode
-from simulation.request.request import SimReq
+from scheduling.prefill_adder import SimPrefillAdder, AddReqResult
+from memory.radix_cache import SimRadixCache
+from memory.token_to_kv_pool import SimTokenToKVPool
+from request.batch import SimBatch, ForwardMode
+from request.request import SimReq
 
 
 class TestPrefillAdder:

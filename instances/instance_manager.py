@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from simulation.instances.base_instance import InstanceType, SimInstance
-from simulation.instances.decode_instance import DecodeInstance
-from simulation.instances.prefill_instance import PrefillInstance
+from instances.base_instance import InstanceType, SimInstance
+from instances.decode_instance import DecodeInstance
+from instances.prefill_instance import PrefillInstance
 
 
 class InstanceManager:

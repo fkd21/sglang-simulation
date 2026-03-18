@@ -8,7 +8,7 @@ for requests that would only generate a few tokens.
 
 from __future__ import annotations
 
-from simulation.request.request import SimReq
+from request.request import SimReq
 
 
 class DecodeContinuation:

@@ -13,9 +13,9 @@ from itertools import product
 from pathlib import Path
 from typing import List, Optional
 
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
-from simulation.metrics.metrics_collector import SimulationResults
+from config import SimConfig
+from core.engine import SimulationEngine
+from metrics.metrics_collector import SimulationResults
 
 
 @dataclass
@@ -73,7 +73,7 @@ class PolicySearcher:
     def __init__(
         self,
         trace_path: str,
-        output_dir: str = "simulation/result",
+        output_dir: str = "result",
         slo_targets: Optional[List[float]] = None,
         M_values: Optional[List[int]] = None,
         switch_policies: Optional[List[str]] = None,

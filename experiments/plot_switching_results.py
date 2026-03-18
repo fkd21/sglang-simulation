@@ -1,10 +1,10 @@
 """Plot role switching policy experiment results.
 
-Reads JSON results from simulation/experiments/results/ and generates
-PNG charts to simulation/experiments/results/plots/.
+Reads JSON results from experiments/results/ and generates
+PNG charts to experiments/results/plots/.
 
 Usage:
-    python -m simulation.experiments.plot_switching_results
+    python -m experiments.plot_switching_results
 """
 
 from __future__ import annotations

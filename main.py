@@ -6,8 +6,8 @@ import json
 import sys
 from pathlib import Path
 
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
+from config import SimConfig
+from core.engine import SimulationEngine
 
 
 def run_baseline_simulation(trace_path: str, num_prefill: int = 1, num_decode: int = 1):
@@ -80,7 +80,7 @@ def main():
 
     if not trace_path.exists():
         print(f"Error: Trace file not found at {trace_path}")
-        print("Please ensure AzureLLMInferenceTrace_code.csv is in the simulation/ directory")
+        print("Please ensure AzureLLMInferenceTrace_code.csv is in the project root directory")
         sys.exit(1)
 
     print("Running baseline P/D disaggregation simulation...")

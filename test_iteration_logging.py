@@ -1,13 +1,13 @@
 """Test script for iteration logging."""
 
 from pathlib import Path
-from simulation.main import run_baseline_simulation
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
+from main import run_baseline_simulation
+from config import SimConfig
+from core.engine import SimulationEngine
 
 def test_iteration_logging():
     """Test iteration logging with a small trace."""
-    trace_path = Path("simulation/AzureLLMInferenceTrace_code.csv")
+    trace_path = Path("AzureLLMInferenceTrace_code.csv")
 
     # Create config for 1P1D
     config = SimConfig(
@@ -30,7 +30,7 @@ def test_iteration_logging():
     print("="*80)
     print(f"Total requests: {results.total_requests}")
     print(f"SLA attainment: {results.sla_attainment_rate:.1f}%")
-    print(f"Check result files in: simulation/result/")
+    print(f"Check result files in: result/")
     print("="*80)
 
 if __name__ == "__main__":

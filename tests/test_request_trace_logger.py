@@ -7,8 +7,8 @@ import tempfile
 
 import pytest
 
-from simulation.config import SimConfig
-from simulation.core.engine import SimulationEngine
+from config import SimConfig
+from core.engine import SimulationEngine
 
 
 def _create_trace_file(requests):
