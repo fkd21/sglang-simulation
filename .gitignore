@@ -1,0 +1,14 @@
+# Data files
+*.json
+*.csv
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Results
+results/
+result/
