@@ -1,21 +1,28 @@
 """Dynamic LP-based partial prefill offloading mechanism.
 
-Uses a sliding-window LP solver (SciPy SLSQP) to determine per-request
-beta values that minimize total offloaded tokens while meeting SLO constraints.
-Replaces the previous static beta policy.
+Uses a greedy analytical solver to determine per-request beta values that
+minimize total offloaded tokens while meeting SLO constraints.
+
+The underlying LP has a lower-triangular constraint matrix, which allows
+exact solution via O(N^2) greedy forward substitution instead of iterative
+numerical optimization.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
-
-from scipy.optimize import minimize
+from typing import List, Sequence, Tuple
 
 from request.request import SimReq
 
-MAX_SOLVER_ITER = 64
 BETA_THRESHOLD = 0.01  # Betas below this are zeroed out
+
+# Profiling model constants
+_PREFILL_INTERCEPT = 0.014654
+_PREFILL_COEFF = 6.944e-5  # 'a' - prefill time per token
+_KV_TRANSFER_COEFF = 1.86683e-6  # 'k' - KV transfer time per token
+_DECODE_BS_COEFF = 6.024e-5
+_DECODE_DTS_COEFF = 8.463e-8
 
 
 def prefill_inference_time(length: float) -> float:
@@ -23,7 +30,7 @@ def prefill_inference_time(length: float) -> float:
 
     Uses: t = 0.014654 + 6.944e-5 * prefill_tokens
     """
-    return 0.014654 + 6.944e-5 * length
+    return _PREFILL_INTERCEPT + _PREFILL_COEFF * length
 
 
 def offload_prefill_on_decode_time(
@@ -38,103 +45,39 @@ def offload_prefill_on_decode_time(
     t = 0.014654 + 6.944e-5 * length + 6.024e-5 * decode_bs + 8.463e-8 * decode_token_sum
     """
     return (
-        0.014654
-        + 6.944e-5 * length
-        + 6.024e-5 * decode_bs
-        + 8.463e-8 * decode_token_sum
+        _PREFILL_INTERCEPT
+        + _PREFILL_COEFF * length
+        + _DECODE_BS_COEFF * decode_bs
+        + _DECODE_DTS_COEFF * decode_token_sum
     )
 
 
-class _DESScheduleEvaluator:
-    """Schedule evaluator that uses actual profiling formulas and decode state.
-
-    Caches schedule evaluations for the SciPy solver callbacks.
-
-    Uses a smooth formulation (always computes offload_duration) so the
-    SLSQP solver can compute correct gradients.
-    """
-
-    def __init__(
-        self,
-        window: Sequence[SimReq],
-        prefill_ready: float,
-        decode_bs: int,
-        decode_token_sum: int,
-    ) -> None:
-        self.window = window
-        self.prefill_ready = prefill_ready
-        self.decode_bs = decode_bs
-        self.decode_token_sum = decode_token_sum
-        self._cache_key: Optional[Tuple[float, ...]] = None
-        self._cache_schedule: List[Dict[str, float]] = []
-
-    def schedule(self, betas: Sequence[float]) -> List[Dict[str, float]]:
-        key = tuple(float(b) for b in betas)
-        if self._cache_key != key:
-            self._cache_key = key
-            self._cache_schedule = self._compute_schedule(key)
-        return self._cache_schedule
-
-    def _compute_schedule(self, betas: Sequence[float]) -> List[Dict[str, float]]:
-        """Compute per-request schedule with actual profiling formulas."""
-        current_time = self.prefill_ready
-        schedule: List[Dict[str, float]] = []
-        for req, beta in zip(self.window, betas):
-            beta = min(max(beta, 0.0), 1.0)
-            start = max(current_time, req.queue_entry_time)
-
-            # Prefill duration: (1-beta) * context_tokens on prefill instance
-            effective_prefill_tokens = max((1.0 - beta) * req.context_tokens, 0.0)
-            prefill_duration = prefill_inference_time(effective_prefill_tokens)
-            prefill_finish = start + prefill_duration
-
-            # KV transfer time for the (1-beta) portion
-            kv_transfer = 1.86683e-6 * effective_prefill_tokens
-
-            # Offload duration: beta * context_tokens on decode instance.
-            # Always compute (even for beta~0) to keep the function smooth
-            # for the SLSQP solver's numerical gradient computation.
-            offload_tokens = max(beta * req.context_tokens, 0.0)
-            offload_duration = offload_prefill_on_decode_time(
-                offload_tokens, self.decode_bs, self.decode_token_sum
-            )
-
-            # Total latency from queue entry to first decode token:
-            # queue_wait + prefill + kv_transfer + offload
-            total_latency = (
-                (prefill_finish - req.queue_entry_time)
-                + kv_transfer
-                + offload_duration
-            )
-
-            schedule.append(
-                {
-                    "start": start,
-                    "finish": prefill_finish,
-                    "prefill_duration": prefill_duration,
-                    "kv_transfer": kv_transfer,
-                    "offload_duration": offload_duration,
-                    "total_latency": total_latency,
-                    "queue_time": start - req.queue_entry_time,
-                }
-            )
-            current_time = prefill_finish  # Serial prefill assumption
-        return schedule
-
-
 class DynamicBetaSolver:
-    """LP-based dynamic beta solver for partial prefill offloading.
+    """Analytical solver for partial prefill offloading betas.
 
-    Adapts the standalone sliding-window LP solver for integration
-    with the online DES simulator. Key differences from standalone:
+    Exploits the fact that the optimization problem is a linear program
+    with lower-triangular constraint structure, enabling exact O(N^2)
+    greedy forward substitution.
 
-    1. Uses actual decode instance state (batch size, token sum) for
-       offload duration estimation.
-    2. Applies betas to ALL requests in the window (not just the first),
-       since the next scheduling opportunity is unknown.
-    3. Wall-clock solver time is measured and returned for TTFT accounting.
-    4. Two-phase approach: first checks if beta=0 meets all SLOs (no
-       offloading needed). Only invokes SLSQP when offloading is required.
+    Mathematical formulation:
+        minimize   sum_i  c_i * beta_i        (minimize total offloaded tokens)
+        subject to:
+            For each request i in window:
+                a * sum_{j<i} c_j*beta_j + k * c_i*beta_i >= C_i - R_i
+            0 <= beta_i <= 1
+
+    Where:
+        c_i = context_tokens of request i
+        a   = prefill time coefficient (6.944e-5)
+        k   = KV transfer coefficient (1.86683e-6)
+        C_i = constant term (prefill + KV + offload overhead at beta=0)
+        R_i = slo_target - queue_wait_i
+
+    Key insight: increasing beta_j (j < i) reduces cumulative prefill for
+    constraint i at rate a*c_j, while increasing beta_i only helps via KV
+    transfer savings at rate k*c_i. Since a >> k (~37x), earlier betas are
+    far more cost-effective, and all j < i have equal efficiency (a),
+    so greedy earliest-first is optimal.
     """
 
     def __init__(self, slo_target: float, max_window_size: int = 5):
@@ -153,7 +96,7 @@ class DynamicBetaSolver:
         Uses a two-phase approach:
         1. Check if beta=0 (no offloading) meets all SLO constraints.
            If so, return immediately (offloading is unnecessary).
-        2. Otherwise, run smooth SLSQP solver to find minimal offloading.
+        2. Otherwise, solve analytically via greedy forward substitution.
 
         Args:
             requests: Up to max_window_size requests from the waiting queue.
@@ -169,51 +112,78 @@ class DynamicBetaSolver:
             return [], True, 0.0
 
         window = list(requests[: self.max_window_size])
-        window_size = len(window)
+        n = len(window)
 
         t_start = time.perf_counter()
 
         # Phase 1: Check if beta=0 already satisfies all constraints.
-        # Use exact evaluation (no offload overhead when beta=0).
         if self._all_slo_met_at_zero(window, prefill_ready_time):
             solve_time = time.perf_counter() - t_start
-            return [0.0] * window_size, True, solve_time
+            return [0.0] * n, True, solve_time
 
-        # Phase 2: Need offloading. Use smooth evaluator for SLSQP.
-        evaluator = _DESScheduleEvaluator(
-            window, prefill_ready_time, decode_bs, decode_token_sum
-        )
+        # Phase 2: Analytical greedy forward substitution.
+        a = _PREFILL_COEFF
+        b = _PREFILL_INTERCEPT
+        k = _KV_TRANSFER_COEFF
+        D = b + _DECODE_BS_COEFF * decode_bs + _DECODE_DTS_COEFF * decode_token_sum
 
-        bounds = [(0.0, 1.0) for _ in range(window_size)]
-        x0 = [0.5] * window_size
+        c = [req.context_tokens for req in window]
+        q = [
+            max(prefill_ready_time, req.queue_entry_time) - req.queue_entry_time
+            for req in window
+        ]
 
-        def objective(beta: Sequence[float]) -> float:
-            return float(
-                sum(float(b) * req.context_tokens for b, req in zip(beta, window))
-            )
+        betas = [0.0] * n
+        feasible = True
 
-        constraints = self._build_constraints(evaluator, window)
+        # Precompute cumulative sum of context tokens
+        cum_c = 0.0
+        cum_c_list = []
+        for ci in c:
+            cum_c += ci
+            cum_c_list.append(cum_c)
 
-        result = minimize(
-            objective,
-            x0,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=constraints,
-            options={"maxiter": MAX_SOLVER_ITER, "ftol": 1e-9, "disp": False},
-        )
+        for i in range(n):
+            # Constant term: C_i = (i+1)*b + a*sum(c[0..i]) + k*c[i] + D
+            C_i = (i + 1) * b + a * cum_c_list[i] + k * c[i] + D
+            R_i = self.slo_target - q[i]
+
+            # Current LHS reduction from betas set so far
+            lhs_reduction = k * betas[i] * c[i]
+            for j in range(i):
+                lhs_reduction += a * betas[j] * c[j]
+
+            deficit = (C_i - R_i) - lhs_reduction
+
+            if deficit <= 0.0:
+                continue  # Constraint already satisfied
+
+            # Greedy: increase betas starting from earliest (j=0)
+            # Earlier betas help all future constraints too
+            for j in range(i + 1):
+                if deficit <= 1e-12:
+                    break
+                rate = a * c[j] if j < i else k * c[j]
+                if rate <= 0.0:
+                    continue
+                room = 1.0 - betas[j]
+                if room <= 1e-12:
+                    continue
+                needed = deficit / rate
+                increase = min(needed, room)
+                betas[j] += increase
+                deficit -= increase * rate
+
+            if deficit > 1e-9:
+                feasible = False
+
+        # Threshold tiny betas to zero
+        betas = [
+            float(min(max(val, 0.0), 1.0)) if val > BETA_THRESHOLD else 0.0
+            for val in betas
+        ]
+
         solve_time = time.perf_counter() - t_start
-
-        feasible = bool(result.success) and result.x is not None
-        if result.x is None:
-            betas = [0.0] * window_size
-        else:
-            # Threshold tiny betas to zero to avoid useless offloads
-            betas = [
-                float(min(max(val, 0.0), 1.0)) if val > BETA_THRESHOLD else 0.0
-                for val in result.x
-            ]
-
         return betas, feasible, solve_time
 
     def _all_slo_met_at_zero(
@@ -229,7 +199,7 @@ class DynamicBetaSolver:
             start = max(current_time, req.queue_entry_time)
             prefill_duration = prefill_inference_time(req.context_tokens)
             cumulative_prefill += prefill_duration
-            kv_transfer = 1.86683e-6 * req.context_tokens
+            kv_transfer = _KV_TRANSFER_COEFF * req.context_tokens
             queue_wait = start - req.queue_entry_time
             # No offload when beta=0
             total = cumulative_prefill + kv_transfer
@@ -238,23 +208,3 @@ class DynamicBetaSolver:
                 return False
             current_time = start + prefill_duration
         return True
-
-    def _build_constraints(
-        self, evaluator: _DESScheduleEvaluator, window: List[SimReq]
-    ):
-        constraints = []
-        for idx, req in enumerate(window):
-
-            def constraint(beta, i=idx, request=req):
-                schedule = evaluator.schedule(beta)
-                cumulative_prefill = sum(
-                    schedule[j]["prefill_duration"] for j in range(i + 1)
-                )
-                kv_transfer = schedule[i]["kv_transfer"]
-                offload_duration = schedule[i]["offload_duration"]
-                queue_wait = max(evaluator.prefill_ready, request.queue_entry_time) - request.queue_entry_time
-                rhs = self.slo_target - queue_wait
-                return rhs - (cumulative_prefill + kv_transfer + offload_duration)
-
-            constraints.append({"type": "ineq", "fun": constraint})
-        return constraints

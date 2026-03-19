@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import heapq
 import random
-from typing import List
+from typing import List, Tuple
 
 from config import SimConfig
 from core.event import Event, EventType
@@ -1217,8 +1217,9 @@ class SimulationEngine:
 
         events = []
 
-        # Migrate all queued requests
-        migrated_count = self._migrate_queued_requests(instance)
+        # Migrate all queued requests (batched to avoid cascading scheduling)
+        migrated_count, migration_events = self._migrate_queued_requests(instance)
+        events.extend(migration_events)
         print(f"  Migrated {migrated_count} queued requests")
 
         # Check if instance is already idle
@@ -1241,8 +1242,12 @@ class SimulationEngine:
 
         return events
 
-    def _migrate_queued_requests(self, source_instance) -> int:
+    def _migrate_queued_requests(self, source_instance) -> Tuple[int, List[Event]]:
         """Migrate all queued requests from draining instance.
+
+        Uses batched migration: moves all requests first, then triggers
+        scheduling once per affected target instance. This avoids O(n^2)
+        list operations and cascading LP solver calls.
 
         Handles instance-specific queues:
         - PrefillInstance: bootstrap_queue, waiting_queue
@@ -1252,147 +1257,185 @@ class SimulationEngine:
         - transfer_queue (requests in flight, will complete)
         - running_batch (will drain naturally)
 
-        Returns: Number of requests migrated
+        Returns: (number_migrated, scheduling_events)
         """
         migrated_count = 0
+        events: List[Event] = []
 
         if source_instance.instance_type == InstanceType.PREFILL:
-            # Migrate bootstrap_queue
             migrated_count += self._migrate_prefill_bootstrap_queue(source_instance)
-
-            # Migrate waiting_queue
             migrated_count += self._migrate_prefill_waiting_queue(source_instance)
 
+            # Schedule once per affected prefill target (not per request)
+            affected_targets: set = set()
+            for inst in self.instance_manager.prefill_instances:
+                if inst.instance_id != source_instance.instance_id and inst.accepting_requests:
+                    if inst.bootstrap_queue or inst.waiting_queue:
+                        affected_targets.add(inst.instance_id)
+            for inst in self.instance_manager.prefill_instances:
+                if inst.instance_id in affected_targets:
+                    events.extend(self._try_admit_from_bootstrap(inst))
+                    events.extend(self._try_schedule_prefill(inst))
+
         elif source_instance.instance_type == InstanceType.DECODE:
-            # Migrate prealloc_reserved (virtual reservations)
             migrated_count += self._migrate_decode_prealloc_reserved(source_instance)
-
-            # Migrate prealloc_queue
             migrated_count += self._migrate_decode_prealloc_queue(source_instance)
-
-            # Migrate waiting_queue
             migrated_count += self._migrate_decode_waiting_queue(source_instance)
 
-        return migrated_count
+            # Schedule once per affected decode target
+            for inst in self.instance_manager.decode_instances:
+                if inst.instance_id != source_instance.instance_id and inst.accepting_requests:
+                    if inst.waiting_queue:
+                        events.extend(self._try_schedule_decode(inst))
+
+        return migrated_count, events
 
     def _migrate_prefill_bootstrap_queue(self, source: PrefillInstance) -> int:
-        """Migrate bootstrap queue requests with priority."""
+        """Migrate bootstrap queue requests with priority (batched)."""
+        if not source.bootstrap_queue:
+            return 0
+
+        # Take all requests from source at once
+        requests = source.bootstrap_queue[:]
+        source.bootstrap_queue.clear()
+
         count = 0
-        for req in source.bootstrap_queue[:]:
+        unmigrated = []
+        for req in requests:
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.PREFILL, source.instance_id
             )
             if target is None:
                 print(f"  WARNING: Cannot migrate req {req.rid}, no available instances")
+                unmigrated.append(req)
                 continue
 
-            # Mark as migrated for priority handling
             req.migrated_from_switch = True
             req.migration_timestamp = self.current_time
-
-            # Move to target's bootstrap queue (insert at head for priority)
-            source.bootstrap_queue.remove(req)
-            target.bootstrap_queue.insert(0, req)
             req.assigned_prefill_instance = target.instance_id
 
-            # Try to admit from bootstrap
-            self._try_admit_from_bootstrap(target)
+            # Insert at head for priority
+            target.bootstrap_queue.insert(0, req)
             count += 1
 
+        # Put back any unmigrated requests
+        source.bootstrap_queue.extend(unmigrated)
         return count
 
     def _migrate_prefill_waiting_queue(self, source: PrefillInstance) -> int:
-        """Migrate waiting queue requests with priority."""
+        """Migrate waiting queue requests with priority (batched)."""
+        if not source.waiting_queue:
+            return 0
+
+        requests = source.waiting_queue[:]
+        source.waiting_queue.clear()
+
         count = 0
-        for req in source.waiting_queue[:]:
+        unmigrated = []
+        for req in requests:
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.PREFILL, source.instance_id
             )
             if target is None:
+                unmigrated.append(req)
                 continue
 
-            # Free memory on source
             source.free_memory(req)
 
-            # Mark as migrated
             req.migrated_from_switch = True
             req.migration_timestamp = self.current_time
-
-            # Move to target's waiting queue (head for priority)
-            source.waiting_queue.remove(req)
-            target.waiting_queue.insert(0, req)
             req.assigned_prefill_instance = target.instance_id
 
-            # Try to schedule on target
-            self._try_schedule_prefill(target)
+            target.waiting_queue.insert(0, req)
             count += 1
 
+        source.waiting_queue.extend(unmigrated)
         return count
 
     def _migrate_decode_prealloc_reserved(self, source: DecodeInstance) -> int:
-        """Migrate virtual reservations."""
+        """Migrate virtual reservations (batched)."""
+        if not source.prealloc_reserved:
+            return 0
+
+        requests = source.prealloc_reserved[:]
+        source.prealloc_reserved.clear()
+
         count = 0
-        for req in source.prealloc_reserved[:]:
+        unmigrated = []
+        for req in requests:
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.DECODE, source.instance_id
             )
             if target is None:
+                unmigrated.append(req)
                 continue
 
             req.migrated_from_switch = True
             req.migration_timestamp = self.current_time
-
-            source.prealloc_reserved.remove(req)
-            target.prealloc_reserved.insert(0, req)
             req.assigned_decode_instance = target.instance_id
+
+            target.prealloc_reserved.insert(0, req)
             count += 1
 
+        source.prealloc_reserved.extend(unmigrated)
         return count
 
     def _migrate_decode_prealloc_queue(self, source: DecodeInstance) -> int:
-        """Migrate prealloc queue requests."""
+        """Migrate prealloc queue requests (batched)."""
+        if not source.prealloc_queue:
+            return 0
+
+        requests = source.prealloc_queue[:]
+        source.prealloc_queue.clear()
+
         count = 0
-        for req in source.prealloc_queue[:]:
+        unmigrated = []
+        for req in requests:
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.DECODE, source.instance_id
             )
             if target is None:
+                unmigrated.append(req)
                 continue
 
             req.migrated_from_switch = True
             req.migration_timestamp = self.current_time
-
-            source.prealloc_queue.remove(req)
-            target.prealloc_queue.insert(0, req)
             req.assigned_decode_instance = target.instance_id
+
+            target.prealloc_queue.insert(0, req)
             count += 1
 
+        source.prealloc_queue.extend(unmigrated)
         return count
 
     def _migrate_decode_waiting_queue(self, source: DecodeInstance) -> int:
-        """Migrate decode waiting queue requests."""
+        """Migrate decode waiting queue requests (batched)."""
+        if not source.waiting_queue:
+            return 0
+
+        requests = source.waiting_queue[:]
+        source.waiting_queue.clear()
+
         count = 0
-        for req in source.waiting_queue[:]:
+        unmigrated = []
+        for req in requests:
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.DECODE, source.instance_id
             )
             if target is None:
+                unmigrated.append(req)
                 continue
 
-            # Free memory on source
             source.free_memory(req)
 
             req.migrated_from_switch = True
             req.migration_timestamp = self.current_time
-
-            source.waiting_queue.remove(req)
-            target.waiting_queue.insert(0, req)
             req.assigned_decode_instance = target.instance_id
 
-            # Try to schedule on target
-            self._try_schedule_decode(target)
+            target.waiting_queue.insert(0, req)
             count += 1
 
+        source.waiting_queue.extend(unmigrated)
         return count
 
     def _complete_drain(self, instance) -> List[Event]:
