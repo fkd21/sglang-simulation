@@ -138,6 +138,8 @@ class SimulationEngine:
                     itl_sla=getattr(config, 'itl_sla', 0.1),
                     output_dir="result",
                     run_name=self.iteration_logger.run_name,
+                    enable_periodic_plots=getattr(config, 'enable_periodic_plots', True),
+                    plot_interval_minutes=getattr(config, 'monitoring_plot_interval_minutes', 15.0),
                 )
 
         # Resolve chunked prefill size
@@ -208,6 +210,10 @@ class SimulationEngine:
         else:
             total_requests = len(requests)
             trace_exhausted = True  # All loaded upfront
+
+        # Start periodic plot generation (wall-clock timer thread)
+        if self.time_series_monitor:
+            self.time_series_monitor.start_periodic_plotting()
 
         # Main event loop
         while self.event_queue:

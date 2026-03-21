@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +25,8 @@ class TimeSeriesMonitor:
         itl_sla: float = 0.1,
         output_dir: str = "result",
         run_name: str = None,
+        enable_periodic_plots: bool = True,
+        plot_interval_minutes: float = 15.0,
     ):
         """Initialize time-series monitor.
 
@@ -34,6 +38,8 @@ class TimeSeriesMonitor:
             itl_sla: ITL SLA threshold in seconds
             output_dir: Base directory for output files
             run_name: Run name for the output directory (e.g., "20260319_123456_2P2D_azure_code_500")
+            enable_periodic_plots: Enable periodic plot generation (wall-clock time)
+            plot_interval_minutes: Wall-clock interval for plot generation (minutes)
         """
         self.sample_interval = sample_interval
         self.max_samples = max_samples
@@ -66,6 +72,14 @@ class TimeSeriesMonitor:
         # Output file for samples (periodic writes)
         self.samples_file = self.output_dir / "time_series_samples.jsonl"
         self.samples_file_handle = None
+
+        # Periodic plot generation (wall-clock timer thread)
+        self.enable_periodic_plots = enable_periodic_plots
+        self.plot_interval_minutes = plot_interval_minutes
+        self.plot_thread = None
+        self.plot_thread_stop = threading.Event()
+        self.last_plot_time = time.time()
+        self.plot_lock = threading.Lock()  # Protect plot generation
 
     def maybe_sample(
         self, current_time: float, engine_state: Dict[str, Any]
@@ -227,8 +241,71 @@ class TimeSeriesMonitor:
         self.samples_file_handle.write(json.dumps(sample) + '\n')
         self.samples_file_handle.flush()
 
+    def start_periodic_plotting(self):
+        """Start background thread for periodic plot generation."""
+        if not self.enable_periodic_plots:
+            return
+
+        if self.plot_thread is not None and self.plot_thread.is_alive():
+            return  # Already running
+
+        self.plot_thread_stop.clear()
+        self.last_plot_time = time.time()
+        self.plot_thread = threading.Thread(
+            target=self._periodic_plot_worker,
+            name="TimeSeriesMonitor-PlotWorker",
+            daemon=True,
+        )
+        self.plot_thread.start()
+        print(f"[TimeSeriesMonitor] Started periodic plot generation (every {self.plot_interval_minutes} minutes)")
+
+    def stop_periodic_plotting(self):
+        """Stop background plot thread."""
+        if self.plot_thread is None:
+            return
+
+        self.plot_thread_stop.set()
+        self.plot_thread.join(timeout=5.0)
+        if self.plot_thread.is_alive():
+            print("[TimeSeriesMonitor] Warning: Plot thread did not stop cleanly")
+        else:
+            print("[TimeSeriesMonitor] Stopped periodic plot generation")
+        self.plot_thread = None
+
+    def _periodic_plot_worker(self):
+        """Background worker that generates plots periodically (wall-clock time)."""
+        while not self.plot_thread_stop.wait(timeout=60):  # Check every minute
+            elapsed = time.time() - self.last_plot_time
+            if elapsed >= self.plot_interval_minutes * 60:
+                self._generate_plots_safe()
+                self.last_plot_time = time.time()
+
+    def _generate_plots_safe(self):
+        """Thread-safe plot generation."""
+        if len(self.samples) == 0:
+            return  # No data yet
+
+        # Acquire lock to prevent concurrent plot generation
+        if not self.plot_lock.acquire(blocking=False):
+            return  # Skip if already generating plots
+
+        try:
+            print(f"[TimeSeriesMonitor] Generating plots ({len(self.samples)} samples)...")
+            self.generate_plots()
+            print(f"[TimeSeriesMonitor] Plots updated at {time.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"[TimeSeriesMonitor] Error generating plots: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.plot_lock.release()
+
     def finalize(self):
-        """Close file handles."""
+        """Close file handles and stop plot thread."""
+        # Stop periodic plotting thread
+        self.stop_periodic_plotting()
+
+        # Close file handle
         if self.samples_file_handle:
             self.samples_file_handle.close()
             self.samples_file_handle = None

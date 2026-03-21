@@ -98,6 +98,16 @@ class SimConfig:
     enable_iteration_logging: bool = False  # Enable per-instance iteration logging (can be memory/storage intensive)
     enable_request_trace_logging: bool = False  # Enable per-request trace logging (default OFF for large traces to save 2.5GB+ disk + I/O)
 
+    # Periodic plot generation (wall-clock time)
+    enable_periodic_plots: bool = True  # Enable periodic plot generation during simulation
+    monitoring_plot_interval_minutes: float = 15.0  # Wall-clock interval for plot generation (minutes)
+
+    # Multi-threading optimizations (opt-in for performance)
+    enable_parallel_lp_solver: bool = False  # Parallelize LP solver across prefill instances
+    lp_solver_max_workers: int = -1  # Thread pool size (-1 = num_prefill_instances, >0 = explicit)
+    enable_async_logging: bool = False  # Use async I/O for iteration logging
+    enable_parallel_policy_eval: bool = False  # Parallelize policy state collection
+
     # Streaming workload loading (for large traces >100K requests to avoid OOM)
     enable_streaming_loading: bool = False  # Enable streaming CSV loading
     streaming_window_size: float = 300.0  # Time window size in seconds (5 minutes)
