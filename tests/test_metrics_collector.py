@@ -10,10 +10,10 @@ class TestMetricsCollector:
 
     def test_initialization(self):
         """Test collector initialization."""
-        collector = MetricsCollector(ttft_sla=1.0, itl_sla=0.05)
+        collector = MetricsCollector(ttft_sla=1.0, itl_sla=0.1)
 
         assert collector.ttft_sla == 1.0
-        assert collector.itl_sla == 0.05
+        assert collector.itl_sla == 0.1
         assert len(collector.arrivals) == 0
         assert len(collector.completions) == 0
 
@@ -75,7 +75,7 @@ class TestMetricsCollector:
 
     def test_itl_calculation(self):
         """Test ITL calculation and SLA tracking."""
-        collector = MetricsCollector(itl_sla=0.05)
+        collector = MetricsCollector(itl_sla=0.1)
 
         # Request that meets ITL SLA
         req1 = SimReq("req_1", 1.0, 100, 50)
@@ -91,7 +91,7 @@ class TestMetricsCollector:
         assert abs(collector.itl_values[0] - 0.02) < 1e-6
         assert collector.itl_sla_met[0] is True
 
-        # Request that violates ITL SLA
+        # Request that meets ITL SLA at boundary (ITL = 0.1s = 100ms)
         req2 = SimReq("req_2", 2.0, 100, 10)
         req2.prefill_end_time = 3.0
         req2.decode_start_time = 4.0
@@ -100,14 +100,28 @@ class TestMetricsCollector:
 
         collector.record_completion(req2, 5.0)
 
-        # ITL = (5.0 - 4.0) / 10 = 0.1s > 0.05s
+        # ITL = (5.0 - 4.0) / 10 = 0.1s = 100ms (meets SLA)
         assert len(collector.itl_values) == 2
         assert abs(collector.itl_values[1] - 0.1) < 1e-6
-        assert collector.itl_sla_met[1] is False
+        assert collector.itl_sla_met[1] is True
+
+        # Request that violates ITL SLA
+        req3 = SimReq("req_3", 5.0, 100, 5)
+        req3.prefill_end_time = 6.0
+        req3.decode_start_time = 7.0
+        req3.decode_end_time = 8.0
+        req3.decode_tokens_generated = 5
+
+        collector.record_completion(req3, 8.0)
+
+        # ITL = (8.0 - 7.0) / 5 = 0.2s = 200ms > 100ms
+        assert len(collector.itl_values) == 3
+        assert abs(collector.itl_values[2] - 0.2) < 1e-6
+        assert collector.itl_sla_met[2] is False
 
     def test_overall_sla_calculation(self):
         """Test overall SLA attainment (both TTFT and ITL must pass)."""
-        collector = MetricsCollector(ttft_sla=1.0, itl_sla=0.05)
+        collector = MetricsCollector(ttft_sla=1.0, itl_sla=0.1)
 
         # Request 1: meets both SLAs
         req1 = SimReq("req_1", 1.0, 100, 50)
@@ -118,11 +132,11 @@ class TestMetricsCollector:
         collector.record_completion(req1, 3.0)
 
         # Request 2: meets TTFT but violates ITL
-        req2 = SimReq("req_2", 2.0, 100, 10)
+        req2 = SimReq("req_2", 2.0, 100, 5)
         req2.prefill_end_time = 2.8  # TTFT = 0.8s ✓
         req2.decode_start_time = 3.0
-        req2.decode_end_time = 4.0  # ITL = 1.0/10 = 0.1s ✗
-        req2.decode_tokens_generated = 10
+        req2.decode_end_time = 4.0  # ITL = 1.0/5 = 0.2s ✗ (> 0.1s)
+        req2.decode_tokens_generated = 5
         collector.record_completion(req2, 4.0)
 
         # Request 3: violates TTFT but meets ITL

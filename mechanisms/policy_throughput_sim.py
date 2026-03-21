@@ -25,11 +25,26 @@ class PolicyThroughputSim:
     Computes per-instance capability using the profiling formula, then derives
     the optimal np:nd ratio from the balance equation:
         np * p_capability / p_throughput = nd * d_capability / d_throughput
+
+    Uses EMA (Exponential Moving Average) smoothing to reduce noise from workload
+    fluctuations while maintaining sensitivity to real trend changes.
     """
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self._last_proposal_unix = 0.0
+
+        # EMA smoothing state
+        self._ema_input_throughput = None
+        self._ema_output_throughput = None
+
+        # Adaptive EMA parameters
+        # Base alpha: controls baseline smoothing (lower = smoother)
+        self._base_alpha = float(getattr(args, "ema_base_alpha", 0.3))
+        # Max alpha: used when detecting sharp changes (higher = more responsive)
+        self._max_alpha = float(getattr(args, "ema_max_alpha", 0.7))
+        # Sensitivity threshold: ratio change % that triggers higher alpha
+        self._sensitivity_threshold = float(getattr(args, "ema_sensitivity_threshold", 0.2))
 
     def evaluate(
         self,
@@ -88,6 +103,16 @@ class PolicyThroughputSim:
         if input_throughput <= 0 or output_throughput <= 0:
             return self._noop("zero_throughput", context)
 
+        # Apply EMA smoothing with adaptive sensitivity
+        smoothed_input, smoothed_output = self._apply_ema_smoothing(
+            input_throughput, output_throughput
+        )
+
+        context.update({
+            "smoothed_input_throughput": smoothed_input,
+            "smoothed_output_throughput": smoothed_output,
+        })
+
         # Guard: insufficient decode data
         if avg_dbs <= 0:
             return self._noop("insufficient_decode_data", context)
@@ -116,10 +141,10 @@ class PolicyThroughputSim:
             "max_decode_batch_size": max_bs,
         })
 
-        # Compute target np:nd ratio
+        # Compute target np:nd ratio using smoothed throughput
         # np * p_cap / p_thru = nd * d_cap / d_thru
         # => np/nd = (d_cap * p_thru) / (p_cap * d_thru)
-        ratio = (d_capability * input_throughput) / (p_capability * output_throughput)
+        ratio = (d_capability * smoothed_input) / (p_capability * smoothed_output)
         target_np = round(N * ratio / (1 + ratio))
 
         # Clamp to ensure min 1 of each
@@ -178,6 +203,52 @@ class PolicyThroughputSim:
                 "proposals": proposals,
             },
         }
+
+    def _apply_ema_smoothing(
+        self, input_throughput: float, output_throughput: float
+    ) -> tuple[float, float]:
+        """Apply EMA smoothing with adaptive sensitivity.
+
+        Uses a variable alpha that increases when detecting sharp changes,
+        allowing the system to be smooth during stable periods but responsive
+        to real workload shifts.
+
+        Args:
+            input_throughput: Current interval's input throughput
+            output_throughput: Current interval's output throughput
+
+        Returns:
+            Tuple of (smoothed_input, smoothed_output)
+        """
+        # First time: initialize EMA with current values
+        if self._ema_input_throughput is None:
+            self._ema_input_throughput = input_throughput
+            self._ema_output_throughput = output_throughput
+            return input_throughput, output_throughput
+
+        # Calculate current throughput ratio
+        current_ratio = input_throughput / output_throughput if output_throughput > 0 else 1.0
+        ema_ratio = self._ema_input_throughput / self._ema_output_throughput if self._ema_output_throughput > 0 else 1.0
+
+        # Detect sharp changes: if ratio changed by more than threshold, use higher alpha
+        ratio_change = abs(current_ratio - ema_ratio) / (ema_ratio if ema_ratio > 0 else 1.0)
+
+        if ratio_change > self._sensitivity_threshold:
+            # Sharp change detected - use higher alpha for faster response
+            alpha = self._max_alpha
+        else:
+            # Gradual change or stable - use lower alpha for smoothing
+            alpha = self._base_alpha
+
+        # Apply EMA: new_ema = alpha * current + (1 - alpha) * old_ema
+        self._ema_input_throughput = (
+            alpha * input_throughput + (1 - alpha) * self._ema_input_throughput
+        )
+        self._ema_output_throughput = (
+            alpha * output_throughput + (1 - alpha) * self._ema_output_throughput
+        )
+
+        return self._ema_input_throughput, self._ema_output_throughput
 
     def _is_switchable(self, w: WorkerState) -> bool:
         """Check if a worker is eligible for switching."""

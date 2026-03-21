@@ -65,7 +65,7 @@ def generate_csv_workload(
 def _run_one(args: Tuple) -> Dict[str, Any]:
     """Worker function for parallel execution (must be module-level for pickle)."""
     config, label, extras = args
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
     results = engine.run()
     d = results.to_dict()
     d["label"] = label

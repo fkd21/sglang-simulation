@@ -141,7 +141,7 @@ def generate_csv_workload(
 def _run_one(args: Tuple) -> Dict[str, Any]:
     """Worker function for parallel execution (must be module-level for pickle)."""
     config, label, extras = args
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
     results = engine.run()
     d = results.to_dict()
     d["label"] = label
@@ -195,7 +195,7 @@ def experiment_slo_sensitivity() -> List[Dict]:
     # Baseline (no offload)
     config = SimConfig(
         trace_path=trace,
-        num_prefill_instances=2,
+        num_prefill_instances=4,
         num_decode_instances=4,
         enable_dynamic_lp=False,
     )
@@ -205,7 +205,7 @@ def experiment_slo_sensitivity() -> List[Dict]:
     for slo in slo_targets:
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=2,
+            num_prefill_instances=4,
             num_decode_instances=4,
             enable_dynamic_lp=True,
             slo_target=slo,
@@ -279,7 +279,7 @@ def experiment_context_length() -> List[Dict]:
         # Baseline
         config = SimConfig(
             trace_path=str(trace_path),
-            num_prefill_instances=2,
+            num_prefill_instances=4,
             num_decode_instances=4,
             enable_dynamic_lp=False,
         )
@@ -288,7 +288,7 @@ def experiment_context_length() -> List[Dict]:
         # Offload
         config = SimConfig(
             trace_path=str(trace_path),
-            num_prefill_instances=2,
+            num_prefill_instances=4,
             num_decode_instances=4,
             enable_dynamic_lp=True,
             slo_target=1.0,
@@ -298,7 +298,7 @@ def experiment_context_length() -> List[Dict]:
     # Also test with Azure trace
     config_bl = SimConfig(
         trace_path=str(AZURE_TRACE),
-        num_prefill_instances=2,
+        num_prefill_instances=4,
         num_decode_instances=4,
         enable_dynamic_lp=False,
     )
@@ -306,7 +306,7 @@ def experiment_context_length() -> List[Dict]:
 
     config_off = SimConfig(
         trace_path=str(AZURE_TRACE),
-        num_prefill_instances=2,
+        num_prefill_instances=4,
         num_decode_instances=4,
         enable_dynamic_lp=True,
         slo_target=1.0,
@@ -330,7 +330,7 @@ def experiment_window_size() -> List[Dict]:
     # Baseline
     config = SimConfig(
         trace_path=trace,
-        num_prefill_instances=2,
+        num_prefill_instances=4,
         num_decode_instances=4,
         enable_dynamic_lp=False,
     )
@@ -339,7 +339,7 @@ def experiment_window_size() -> List[Dict]:
     for ws in window_sizes:
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=2,
+            num_prefill_instances=4,
             num_decode_instances=4,
             enable_dynamic_lp=True,
             slo_target=1.0,
@@ -375,7 +375,7 @@ def experiment_load_level() -> List[Dict]:
         # Baseline
         config = SimConfig(
             trace_path=str(trace_path),
-            num_prefill_instances=2,
+            num_prefill_instances=4,
             num_decode_instances=4,
             enable_dynamic_lp=False,
         )
@@ -384,7 +384,7 @@ def experiment_load_level() -> List[Dict]:
         # Offload
         config = SimConfig(
             trace_path=str(trace_path),
-            num_prefill_instances=2,
+            num_prefill_instances=4,
             num_decode_instances=4,
             enable_dynamic_lp=True,
             slo_target=1.0,
@@ -470,8 +470,8 @@ def experiment_switching_offload_1p7d() -> List[Dict]:
         # Without offload
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=1,
-            num_decode_instances=7,
+            num_prefill_instances=4,
+            num_decode_instances=4,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
             enable_dynamic_lp=False,
@@ -485,8 +485,8 @@ def experiment_switching_offload_1p7d() -> List[Dict]:
         # With offload
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=1,
-            num_decode_instances=7,
+            num_prefill_instances=4,
+            num_decode_instances=4,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
             enable_dynamic_lp=True,

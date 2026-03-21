@@ -9,7 +9,7 @@ def test_iteration_logging():
     """Test iteration logging with a small trace."""
     trace_path = Path("AzureLLMInferenceTrace_code.csv")
 
-    # Create config for 1P1D
+    # Create config for 1P1D with iteration logging enabled
     config = SimConfig(
         trace_path=str(trace_path),
         num_prefill_instances=1,
@@ -17,12 +17,13 @@ def test_iteration_logging():
         M=0,
         enable_dynamic_lp=False,
         enable_continuation=False,
-        enable_switching=False
+        enable_switching=False,
+        enable_iteration_logging=True  # Enable iteration logging for testing
     )
 
     # Run with iteration logging enabled
     print("Running simulation with iteration logging enabled...")
-    engine = SimulationEngine(config, enable_iteration_logging=True)
+    engine = SimulationEngine(config)
     results = engine.run()
 
     print("\n" + "="*80)

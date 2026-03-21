@@ -20,11 +20,11 @@ from config import SimConfig
 config = SimConfig(
     trace_path="AzureLLMInferenceTrace_code.csv",
     num_prefill_instances=4,
-    num_decode_instances=4
+    num_decode_instances=4,
+    enable_iteration_logging=True  # Enable per-instance iteration logging
 )
 
-# Enable iteration logging
-engine = SimulationEngine(config, enable_iteration_logging=True)
+engine = SimulationEngine(config)
 results = engine.run()
 ```
 

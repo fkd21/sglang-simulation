@@ -20,15 +20,16 @@ def main():
         num_prefill_instances=2,
         num_decode_instances=2,
         max_prefill_tokens=16384,
-        schedule_policy="fcfs"
+        schedule_policy="fcfs",
+        enable_iteration_logging=True  # Enable per-instance iteration logging
     )
 
     print("="*80)
     print("Running simulation with iteration logging...")
     print("="*80)
 
-    # Create engine with logging enabled
-    engine = SimulationEngine(config, enable_iteration_logging=True)
+    # Create engine
+    engine = SimulationEngine(config)
 
     # Run simulation
     results = engine.run()

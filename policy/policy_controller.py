@@ -64,6 +64,33 @@ class PolicyController:
             requests, prefill_ready_time, decode_bs, decode_token_sum
         )
 
+    def solve_dynamic_betas_with_budget(
+        self,
+        requests: Sequence[SimReq],
+        prefill_ready_time: float,
+        decode_bs: int,
+        decode_token_sum: int,
+        decode_budget: float
+    ) -> Tuple[List[float], bool, float]:
+        """Solve LP with decode budget constraint.
+
+        Args:
+            requests: Requests to solve for
+            prefill_ready_time: When prefill becomes available
+            decode_bs: Current decode batch size
+            decode_token_sum: Current decode token sum
+            decode_budget: Maximum offload tokens allowed
+
+        Returns:
+            (betas, feasible, solve_time)
+        """
+        if self.lp_solver is None:
+            return [0.0] * len(requests), True, 0.0
+
+        return self.lp_solver.solve_with_decode_budget(
+            requests, prefill_ready_time, decode_bs, decode_token_sum, decode_budget
+        )
+
     def tokens_to_continue_on_prefill(self, req: SimReq) -> int:
         """Compute decode continuation length on prefill instance.
 

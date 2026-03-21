@@ -163,13 +163,20 @@ class PrefillScheduler:
 
         # Allocate memory and update state for admitted requests
         final_list = []
+        failed_reqs = []  # Track allocation failures to put back in queue
+
         for req in can_run_list:
             if not self.instance.allocate_memory(req):
-                # Allocation failed
+                # Allocation failed - will put back to queue
+                failed_reqs.append(req)
                 continue
 
             req.stage = RequestStage.PREFILL_FORWARD
             final_list.append(req)
+
+        # Put failed requests back to the front of waiting queue (priority)
+        if failed_reqs:
+            self.instance.waiting_queue = failed_reqs + self.instance.waiting_queue
 
         if not final_list:
             return None

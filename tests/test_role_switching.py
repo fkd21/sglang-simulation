@@ -69,7 +69,7 @@ def test_switch_schedule_loading(simple_trace_file):
         ]
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     # Check that ROLE_SWITCH events were created
     switch_events = [e for e in engine.event_queue if e.event_type == EventType.ROLE_SWITCH]
@@ -118,7 +118,7 @@ def test_initiate_switch_idle_instance(simple_trace_file):
         switch_min_blocking_time=5.0,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     # Get a prefill instance
     prefill_instance = engine.instance_manager.prefill_instances[0]
@@ -149,7 +149,7 @@ def test_no_accept_during_drain(simple_trace_file):
         num_decode_instances=2,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     # Get a prefill instance and mark it as draining
     prefill_instance = engine.instance_manager.prefill_instances[0]
@@ -192,7 +192,7 @@ def test_all_instances_draining_defers_requests(simple_trace_file):
         num_decode_instances=2,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     # Mark all prefill instances as draining
     for pi in engine.instance_manager.prefill_instances:
@@ -230,7 +230,7 @@ def test_migration_priority_insertion(simple_trace_file):
         num_decode_instances=2,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     source = engine.instance_manager.prefill_instances[0]
     target = engine.instance_manager.prefill_instances[1]
@@ -303,7 +303,7 @@ def test_switch_unblock_changes_role(simple_trace_file):
         num_decode_instances=2,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     # Get a prefill instance
     instance = engine.instance_manager.prefill_instances[0]
@@ -346,7 +346,7 @@ def test_drain_completion_detection(simple_trace_file):
         switch_min_blocking_time=5.0,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     # Get a prefill instance
     instance = engine.instance_manager.prefill_instances[0]
@@ -377,7 +377,7 @@ def test_blocking_period_minimum_5s(simple_trace_file):
         switch_min_blocking_time=5.0,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
     instance = engine.instance_manager.prefill_instances[0]
 
     # Initiate switch on idle instance (drain_time = 0)
@@ -401,7 +401,7 @@ def test_blocking_period_uses_drain_time(simple_trace_file):
         switch_min_blocking_time=5.0,
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
     instance = engine.instance_manager.prefill_instances[0]
 
     # Case 1: drain (10s) > min_blocking (5s) → unblock at drain_complete_time
@@ -443,7 +443,7 @@ def test_full_switch_cycle(long_trace_file):
         ]
     )
 
-    engine = SimulationEngine(config, enable_iteration_logging=False)
+    engine = SimulationEngine(config)
 
     # Run simulation
     results = engine.run()

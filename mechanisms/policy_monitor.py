@@ -56,6 +56,10 @@ class PolicyMonitor:
         # Throughput policy params
         max_prefill_tokens: int = 8192,
         max_running_requests: int = 1000,
+        # EMA smoothing params for throughput policy
+        ema_base_alpha: float = 0.3,
+        ema_max_alpha: float = 0.7,
+        ema_sensitivity_threshold: float = 0.2,
     ):
         """Initialize policy monitor.
 
@@ -114,6 +118,9 @@ class PolicyMonitor:
                 idle_scrapes=idle_scrapes,
                 max_prefill_tokens=max_prefill_tokens,
                 max_running_requests=max_running_requests,
+                ema_base_alpha=ema_base_alpha,
+                ema_max_alpha=ema_max_alpha,
+                ema_sensitivity_threshold=ema_sensitivity_threshold,
             )
             self._policy_impl = PolicyThroughputSim(args)
         else:

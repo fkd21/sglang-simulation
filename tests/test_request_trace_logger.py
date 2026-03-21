@@ -29,8 +29,11 @@ class TestRequestTraceLogger:
         """Run simulation and return (results, list of trace dicts, output_dir)."""
         trace_path = _create_trace_file(requests)
         try:
+            # Enable iteration logging for trace testing
+            if 'enable_iteration_logging' not in config_kwargs:
+                config_kwargs['enable_iteration_logging'] = True
             config = SimConfig(trace_path=trace_path, **config_kwargs)
-            engine = SimulationEngine(config, enable_iteration_logging=True)
+            engine = SimulationEngine(config)
             results = engine.run()
 
             trace_file = engine.iteration_logger.output_dir / "request_traces.jsonl"
@@ -166,7 +169,7 @@ class TestRequestTraceLogger:
         trace_path = _create_trace_file([(100, 10)])
         try:
             config = SimConfig(trace_path=trace_path)
-            engine = SimulationEngine(config, enable_iteration_logging=False)
+            engine = SimulationEngine(config)
             results = engine.run()
             assert engine.request_trace_logger is None
         finally:

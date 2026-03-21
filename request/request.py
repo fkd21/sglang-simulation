@@ -140,6 +140,38 @@ class SimReq:
         """Check if decode has started."""
         return self.stage.value >= RequestStage.DECODE_FORWARD.value
 
+    def cleanup_after_completion(self):
+        """Clear large data structures after request completes.
+
+        Frees ~8KB per request by clearing token lists that are
+        no longer needed after completion. This is critical for
+        long simulations to prevent memory explosion.
+        """
+        self.origin_input_ids.clear()
+        self.output_ids.clear()
+        self.kv_cache_indices.clear()
+        self.prefix_indices.clear()
+        self.fill_ids.clear()
+
+    def cleanup_for_queue(self):
+        """Lightweight cleanup for requests waiting in queues.
+
+        Clears heavy token lists while preserving metadata needed for scheduling.
+        Call this when requests enter long-term queues (bootstrap, prealloc).
+        Saves ~12-15 KB per queued request.
+
+        This is different from cleanup_after_completion() which is called
+        when the request is fully done. This method is for requests that
+        are still in the system but waiting in queues.
+        """
+        # Clear token lists - these can be reconstructed if needed
+        self.origin_input_ids.clear()
+        self.output_ids.clear()
+        self.kv_cache_indices.clear()
+        self.fill_ids.clear()
+        # DO NOT clear: arrival_time, context_tokens, generated_tokens, stage, etc.
+        # These are needed for scheduling decisions
+
     def __repr__(self) -> str:
         return (
             f"SimReq(rid={self.rid}, ctx={self.context_tokens}, "

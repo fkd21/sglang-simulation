@@ -5,6 +5,7 @@ Simplified from sglang.srt.mem_cache.radix_cache.RadixCache
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -59,6 +60,9 @@ class SimRadixCache:
         self.eviction_strategy = eviction_strategy
         self.root = SimTreeNode()
         self.evictable_size = 0
+        # Memory limits for eviction (prevents unbounded growth)
+        self.max_total_size = 100_000  # Max total tokens cached
+        self.current_total_size = 0    # Track total cached tokens
 
     def match_prefix(
         self,
@@ -107,6 +111,9 @@ class SimRadixCache:
             matched_indices.extend(child.value[:match_len])
             matched_length += match_len
             remaining_tokens = remaining_tokens[match_len:]
+
+            # Update access time for LRU eviction
+            child.last_access_time = time.time()
 
             if match_len < len(child.key):
                 # Partial match of child
@@ -157,10 +164,19 @@ class SimRadixCache:
                 new_node = SimTreeNode(
                     key=remaining_tokens[:],
                     value=remaining_indices[:],
-                    parent=node
+                    parent=node,
+                    last_access_time=time.time()
                 )
                 node.children[first_token] = new_node
-                self.evictable_size += len(remaining_tokens)
+                tokens_added = len(remaining_tokens)
+                self.evictable_size += tokens_added
+                self.current_total_size += tokens_added
+
+                # Auto-evict if cache exceeds limit
+                if self.current_total_size > self.max_total_size:
+                    overflow = self.current_total_size - self.max_total_size
+                    self.evict(overflow)
+
                 return new_node
 
         return node
@@ -228,6 +244,7 @@ class SimRadixCache:
                     tokens_freed = len(leaf.value)
                     evicted += tokens_freed
                     self.evictable_size -= tokens_freed
+                    self.current_total_size -= tokens_freed
 
                     if evict_callback:
                         evict_callback(leaf.value)

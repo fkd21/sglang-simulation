@@ -38,6 +38,12 @@ class SimConfig:
     enable_dynamic_lp: bool = False  # Enable LP-based dynamic beta solver for partial offloading
     slo_target: float = 1.0  # SLO target in seconds (for LP constraints)
     lp_max_window_size: int = 5  # Max requests in LP sliding window
+
+    # Decode protection for partial offloading
+    tpot_sla: float = 0.1  # 100ms TPOT threshold (10 tokens/sec)
+    itl_sla: float = 0.1  # 100ms ITL SLA threshold
+    enable_decode_protection: bool = True  # Enable decode TPOT constraint
+
     enable_continuation: bool = False
     enable_switching: bool = False
     switch_policy: str = "never"  # "never", "alpha", "v1", "throughput"
@@ -80,3 +86,23 @@ class SimConfig:
     schedule_policy: str = "fcfs"
     max_running_requests: int = 1000 # Max concurrent running requests per instance
     num_reserved_decode_tokens: int = 512  # Per-request decode token reservation for bootstrap gating
+    bootstrap_timeout_seconds: float = 120.0  # Timeout for requests stuck in bootstrap queue (SGLang-style)
+
+    # Metrics and monitoring
+    enable_streaming_metrics: bool = True  # Use O(1) memory streaming statistics
+    metrics_reservoir_size: int = 10000  # Reservoir size for percentile sampling
+    enable_monitoring: bool = True  # Enable time-series monitoring
+    monitoring_sample_interval: float = 1.0  # Sample interval in simulation seconds
+    monitoring_max_samples: int = 10000  # Max samples to keep in memory
+    monitoring_sla_window: int = 1000  # Rolling window size for SLA calculation
+    enable_iteration_logging: bool = False  # Enable per-instance iteration logging (can be memory/storage intensive)
+    enable_request_trace_logging: bool = False  # Enable per-request trace logging (default OFF for large traces to save 2.5GB+ disk + I/O)
+
+    # Streaming workload loading (for large traces >100K requests to avoid OOM)
+    enable_streaming_loading: bool = False  # Enable streaming CSV loading
+    streaming_window_size: float = 300.0  # Time window size in seconds (5 minutes)
+    streaming_lookback: float = 60.0  # Lookback buffer in seconds (1 minute safety margin)
+
+    # Memory profiling (to debug OOM issues)
+    enable_memory_profiling: bool = False  # Enable detailed memory profiling
+    memory_profiling_interval: float = 60.0  # Snapshot interval in simulation seconds

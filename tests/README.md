@@ -63,7 +63,7 @@ Tests discrete-event simulation infrastructure:
 Tests SLA tracking and performance metrics:
 - `TestMetricsCollector`: TTFT/ITL SLA calculation
   - TTFT SLA: ≤ 1.0s (Time To First Token)
-  - ITL SLA: ≤ 50ms (Inter-Token Latency)
+  - ITL SLA: ≤ 100ms (Inter-Token Latency)
   - Overall SLA: both must be met
   - Utilization tracking (prefill/decode instances)
   - Throughput calculation
@@ -113,7 +113,7 @@ python -m pytest tests/ -k "test_sla" -v
 ### SLA Validation
 Tests verify correct calculation of:
 1. **TTFT (Time To First Token)**: `prefill_end_time - arrival_time ≤ 1.0s`
-2. **ITL (Inter-Token Latency)**: `(decode_end_time - decode_start_time) / tokens_generated ≤ 50ms`
+2. **ITL (Inter-Token Latency)**: `(decode_end_time - decode_start_time) / tokens_generated ≤ 100ms`
 3. **Overall SLA**: Both TTFT and ITL must meet thresholds
 
 ### Memory Management

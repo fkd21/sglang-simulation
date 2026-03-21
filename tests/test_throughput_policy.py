@@ -380,7 +380,7 @@ class TestPolicyMonitorThroughput:
             enable_switching=True,
             switch_policy="throughput",
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
 
         all_instances = (
             engine.instance_manager.prefill_instances
@@ -402,7 +402,7 @@ class TestPolicyMonitorThroughput:
             enable_switching=True,
             switch_policy="alpha",
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
         all_instances = (
             engine.instance_manager.prefill_instances
             + engine.instance_manager.decode_instances
@@ -422,7 +422,7 @@ class TestPolicyMonitorThroughput:
             enable_switching=False,
             switch_policy="never",
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
         all_instances = (
             engine.instance_manager.prefill_instances
             + engine.instance_manager.decode_instances
@@ -446,7 +446,7 @@ class TestEngineThroughputCounters:
             num_prefill_instances=1,
             num_decode_instances=1,
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
         assert engine._interval_prefill_tokens == 0
         assert engine._interval_decode_tokens == 0
         assert engine._interval_decode_computed_token_sum == 0
@@ -464,7 +464,7 @@ class TestSelectBestDecodeInstance:
             num_prefill_instances=1,
             num_decode_instances=2,
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
 
         # Mark first decode instance as draining
         engine.instance_manager.decode_instances[0].accepting_requests = False
@@ -481,7 +481,7 @@ class TestSelectBestDecodeInstance:
             num_prefill_instances=1,
             num_decode_instances=2,
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
 
         for inst in engine.instance_manager.decode_instances:
             inst.accepting_requests = False
@@ -507,7 +507,7 @@ class TestThroughputPolicyE2E:
             monitor_interval_s=5.0,
             global_cooldown_s=10.0,
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
         results = engine.run()
 
         assert results.total_requests == 50
@@ -524,7 +524,7 @@ class TestThroughputPolicyE2E:
             monitor_interval_s=5.0,
             global_cooldown_s=10.0,
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
         results = engine.run()
         assert len(engine.metrics_collector.completions) == 50
 
@@ -546,10 +546,157 @@ class TestThroughputPolicyE2E:
             monitor_interval_s=5.0,
             global_cooldown_s=10.0,
         )
-        engine = SimulationEngine(config, enable_iteration_logging=False)
+        engine = SimulationEngine(config)
         results = engine.run()
 
         assert results.total_requests == 500
         assert len(engine.metrics_collector.completions) == 500, (
             f"Expected 500 completions, got {len(engine.metrics_collector.completions)}"
         )
+
+
+# ---- EMA Smoothing Tests ----
+
+
+def test_ema_initialization(default_args):
+    """Test EMA state is initialized correctly on first evaluation."""
+    policy = PolicyThroughputSim(default_args)
+    states = _make_states(np=2, nd=2)
+
+    interval_metrics = {
+        "input_throughput": 1000.0,
+        "output_throughput": 500.0,
+        "avg_decode_computed_token_sum": 5000.0,
+        "avg_decode_batch_size": 10.0,
+    }
+
+    result = policy.evaluate(now_unix=10.0, states=states, interval_metrics=interval_metrics)
+
+    # First time: EMA should equal raw values
+    assert policy._ema_input_throughput == 1000.0
+    assert policy._ema_output_throughput == 500.0
+    assert result["context"]["smoothed_input_throughput"] == 1000.0
+    assert result["context"]["smoothed_output_throughput"] == 500.0
+
+
+def test_ema_smoothing_stable_workload(default_args):
+    """Test EMA smooths small fluctuations in stable workload."""
+    policy = PolicyThroughputSim(default_args)
+    states = _make_states(np=2, nd=2)
+
+    # First evaluation: initialize EMA
+    interval_metrics_1 = {
+        "input_throughput": 1000.0,
+        "output_throughput": 500.0,
+        "avg_decode_computed_token_sum": 5000.0,
+        "avg_decode_batch_size": 10.0,
+    }
+    policy.evaluate(now_unix=5.0, states=states, interval_metrics=interval_metrics_1)
+
+    # Second evaluation: small fluctuation (10% change in ratio is below 20% threshold)
+    interval_metrics_2 = {
+        "input_throughput": 1050.0,  # +5%
+        "output_throughput": 525.0,   # +5%
+        "avg_decode_computed_token_sum": 5000.0,
+        "avg_decode_batch_size": 10.0,
+    }
+    result = policy.evaluate(now_unix=40.0, states=states, interval_metrics=interval_metrics_2)
+
+    # With base_alpha=0.3, EMA should be: 0.3 * new + 0.7 * old
+    expected_input = 0.3 * 1050.0 + 0.7 * 1000.0  # = 1015.0
+    expected_output = 0.3 * 525.0 + 0.7 * 500.0   # = 507.5
+
+    assert abs(result["context"]["smoothed_input_throughput"] - expected_input) < 0.1
+    assert abs(result["context"]["smoothed_output_throughput"] - expected_output) < 0.1
+
+
+def test_ema_high_sensitivity_on_sharp_change(default_args):
+    """Test EMA uses higher alpha when detecting sharp workload changes."""
+    policy = PolicyThroughputSim(default_args)
+    states = _make_states(np=2, nd=2)
+
+    # First evaluation: initialize EMA
+    interval_metrics_1 = {
+        "input_throughput": 1000.0,
+        "output_throughput": 500.0,  # ratio = 2.0
+        "avg_decode_computed_token_sum": 5000.0,
+        "avg_decode_batch_size": 10.0,
+    }
+    policy.evaluate(now_unix=5.0, states=states, interval_metrics=interval_metrics_1)
+
+    # Second evaluation: sharp change (ratio changes from 2.0 to 3.0, 50% change > 20% threshold)
+    interval_metrics_2 = {
+        "input_throughput": 1500.0,  # +50%
+        "output_throughput": 500.0,  # same -> ratio = 3.0
+        "avg_decode_computed_token_sum": 5000.0,
+        "avg_decode_batch_size": 10.0,
+    }
+    result = policy.evaluate(now_unix=40.0, states=states, interval_metrics=interval_metrics_2)
+
+    # Sharp change detected: should use max_alpha=0.7 instead of base_alpha=0.3
+    expected_input = 0.7 * 1500.0 + 0.3 * 1000.0  # = 1350.0
+    expected_output = 0.7 * 500.0 + 0.3 * 500.0   # = 500.0
+
+    assert abs(result["context"]["smoothed_input_throughput"] - expected_input) < 0.1
+    assert abs(result["context"]["smoothed_output_throughput"] - expected_output) < 0.1
+
+
+def test_ema_reduces_switching_noise():
+    """Test that EMA smoothing reduces unnecessary switching from noisy throughput."""
+    args = argparse.Namespace(
+        global_cooldown_s=5.0,  # Short cooldown to allow multiple switches
+        min_prefill=1,
+        min_decode=1,
+        idle_scrapes=2,
+        max_prefill_tokens=8192,
+        max_running_requests=1000,
+        ema_base_alpha=0.2,  # Very smooth
+        ema_max_alpha=0.7,
+        ema_sensitivity_threshold=0.2,
+    )
+    policy = PolicyThroughputSim(args)
+    states = _make_states(np=2, nd=2)
+
+    # Simulate noisy workload with fluctuating throughput
+    throughputs = [
+        (1000.0, 500.0),  # ratio = 2.0
+        (1100.0, 450.0),  # ratio = 2.44 (noisy spike)
+        (950.0, 520.0),   # ratio = 1.83 (noisy dip)
+        (1020.0, 490.0),  # ratio = 2.08 (back to normal)
+    ]
+
+    proposals_count = 0
+    for i, (input_thru, output_thru) in enumerate(throughputs):
+        interval_metrics = {
+            "input_throughput": input_thru,
+            "output_throughput": output_thru,
+            "avg_decode_computed_token_sum": 5000.0,
+            "avg_decode_batch_size": 10.0,
+        }
+        result = policy.evaluate(now_unix=5.0 * (i + 1), states=states, interval_metrics=interval_metrics)
+        if result["action"]["kind"] == "multi_switch_proposed":
+            proposals_count += 1
+
+    # With smoothing, noisy fluctuations should not trigger many switches
+    # Without smoothing, each fluctuation might trigger a switch
+    assert proposals_count <= 1, f"EMA should reduce switching noise, got {proposals_count} proposals"
+
+
+def test_ema_custom_parameters():
+    """Test that custom EMA parameters are properly used."""
+    args = argparse.Namespace(
+        global_cooldown_s=10.0,
+        min_prefill=1,
+        min_decode=1,
+        idle_scrapes=2,
+        max_prefill_tokens=8192,
+        max_running_requests=1000,
+        ema_base_alpha=0.1,  # Very smooth
+        ema_max_alpha=0.9,   # Very responsive
+        ema_sensitivity_threshold=0.5,  # High threshold
+    )
+    policy = PolicyThroughputSim(args)
+
+    assert policy._base_alpha == 0.1
+    assert policy._max_alpha == 0.9
+    assert policy._sensitivity_threshold == 0.5

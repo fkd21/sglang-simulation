@@ -25,7 +25,7 @@ class SimTokenToKVPool:
         """
         self.total_kv_tokens = total_kv_tokens
         self.free_kv_tokens = total_kv_tokens
-        self.allocated: dict[int, List[int]] = {}  # req_pool_idx -> indices
+        # Note: allocated dict removed - was never used (vestigial from SGLang)
         self._next_idx = 0
 
     def alloc(self, num_tokens: int) -> Optional[List[int]]:
@@ -78,5 +78,4 @@ class SimTokenToKVPool:
     def reset(self):
         """Reset allocator to initial state."""
         self.free_kv_tokens = self.total_kv_tokens
-        self.allocated.clear()
         self._next_idx = 0

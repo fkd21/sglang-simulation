@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import logging
 import random
 from typing import List, Tuple
 
@@ -13,6 +14,7 @@ from instances.decode_instance import DecodeInstance
 from instances.instance_manager import InstanceManager
 from instances.prefill_instance import PrefillInstance
 from metrics.metrics_collector import MetricsCollector, SimulationResults
+from metrics.time_series_monitor import TimeSeriesMonitor
 from policy.policy_controller import PolicyController
 from mechanisms.policy_monitor import PolicyMonitor
 from request.batch import ForwardMode, SimBatch
@@ -25,7 +27,8 @@ from utils.profiling_formulas import (
     compute_inference_time,
     compute_kv_transfer_time,
 )
-from workload.trace_loader import WorkloadDriver
+from workload.trace_loader import WorkloadDriver, StreamingWorkloadDriver
+from utils.memory_profiler import MemoryProfiler
 
 
 class SimulationEngine:
@@ -43,8 +46,28 @@ class SimulationEngine:
         self.event_queue: List[Event] = []
         random.seed(42)  # Deterministic batch duration noise
 
-        # Components
-        self.workload_driver = WorkloadDriver(config.trace_path)
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
+
+        # Memory profiler (disabled by default, enable via config)
+        self.memory_profiler = MemoryProfiler(
+            enabled=getattr(config, 'enable_memory_profiling', False),
+            interval=getattr(config, 'memory_profiling_interval', 60.0),
+        )
+        self.memory_profiler.start()
+
+        # Components - use streaming loader for large traces
+        if config.enable_streaming_loading:
+            self.workload_driver = StreamingWorkloadDriver(
+                config.trace_path,
+                window_size=config.streaming_window_size,
+                lookback=config.streaming_lookback,
+            )
+            self.streaming_enabled = True
+        else:
+            self.workload_driver = WorkloadDriver(config.trace_path)
+            self.streaming_enabled = False
+
         self.instance_manager = InstanceManager(
             num_prefill=config.num_prefill_instances,
             num_decode=config.num_decode_instances,
@@ -94,6 +117,7 @@ class SimulationEngine:
         # Iteration logger (optional)
         self.iteration_logger = None
         self.request_trace_logger = None
+        self.time_series_monitor = None
         self.iteration_count = 0
         if enable_iteration_logging:
             self.iteration_logger = IterationLogger(
@@ -104,6 +128,17 @@ class SimulationEngine:
             self.request_trace_logger = RequestTraceLogger(
                 self.iteration_logger.output_dir
             )
+            # Initialize time-series monitor with same output directory
+            if getattr(config, 'enable_monitoring', True):
+                self.time_series_monitor = TimeSeriesMonitor(
+                    sample_interval=getattr(config, 'monitoring_sample_interval', 1.0),
+                    max_samples=getattr(config, 'monitoring_max_samples', 10000),
+                    sla_window_size=getattr(config, 'monitoring_sla_window', 1000),
+                    ttft_sla=getattr(config, 'ttft_sla', 1.0),
+                    itl_sla=getattr(config, 'itl_sla', 0.1),
+                    output_dir="result",
+                    run_name=self.iteration_logger.run_name,
+                )
 
         # Resolve chunked prefill size
         chunked_prefill_size = None
@@ -167,25 +202,88 @@ class SimulationEngine:
 
         # Load trace and initialize events
         requests = self._initialize_workload()
-        total_requests = len(requests)
+        if self.streaming_enabled:
+            total_requests = None  # Unknown in streaming mode
+            trace_exhausted = False
+        else:
+            total_requests = len(requests)
+            trace_exhausted = True  # All loaded upfront
 
         # Main event loop
         while self.event_queue:
             event = heapq.heappop(self.event_queue)
             self.current_time = event.timestamp
 
+            # Streaming mode: load next window if needed
+            if self.streaming_enabled and not trace_exhausted:
+                if self.workload_driver.should_load_next_window(self.current_time):
+                    print(f"[Streaming @ t={self.current_time:.1f}s] Loading next window...")
+                    next_requests = self.workload_driver.load_next_window()
+
+                    # Schedule new arrival events
+                    for req in next_requests:
+                        new_event = Event(
+                            timestamp=req.arrival_time,
+                            event_type=EventType.REQUEST_ARRIVAL,
+                            data={"request": req},
+                        )
+                        heapq.heappush(self.event_queue, new_event)
+
+                    # Check if trace is exhausted
+                    if self.workload_driver.trace_exhausted:
+                        trace_exhausted = True
+                        total_requests = self.workload_driver.total_requests_loaded
+                        print(f"[Streaming] Trace exhausted. Total requests: {total_requests}")
+
             new_events = self._dispatch_event(event)
 
             for new_event in new_events:
                 heapq.heappush(self.event_queue, new_event)
 
-            if len(self.metrics_collector.completions) >= total_requests:
+            # Memory profiling (periodic snapshots)
+            self.memory_profiler.snapshot(
+                self.current_time,
+                event_queue=self.event_queue,
+                metrics=self.metrics_collector,
+            )
+
+            # Time-series monitoring (periodic sampling)
+            if self.time_series_monitor:
+                engine_state = {
+                    'all_instances': (self.instance_manager.prefill_instances +
+                                     self.instance_manager.decode_instances),
+                    'metrics_collector': self.metrics_collector,
+                }
+                self.time_series_monitor.maybe_sample(self.current_time, engine_state)
+
+            # Check bootstrap queue timeouts (SGLang-style)
+            for prefill_inst in self.instance_manager.prefill_instances:
+                self._abort_bootstrap_on_timeout(prefill_inst)
+
+            # Check completion condition
+            completed = (self.metrics_collector.num_completions
+                        if self.metrics_collector.enable_streaming
+                        else len(self.metrics_collector.completions))
+
+            # In streaming mode, only break when trace is exhausted AND all completed
+            if total_requests is not None and completed >= total_requests:
                 print(f"All {total_requests} requests completed!")
                 break
 
-        completed = len(self.metrics_collector.completions)
+        # Get final completion count
+        completed = (self.metrics_collector.num_completions
+                    if self.metrics_collector.enable_streaming
+                    else len(self.metrics_collector.completions))
+
+        # Close streaming loader if used
+        if self.streaming_enabled:
+            self.workload_driver.close()
+            if total_requests is None:
+                total_requests = self.workload_driver.total_requests_loaded
+            print(f"[Streaming] Closed trace loader. Total loaded: {total_requests}")
+
         completion_rate = (
-            (completed / total_requests * 100) if total_requests > 0 else 0.0
+            (completed / total_requests * 100) if total_requests and total_requests > 0 else 0.0
         )
 
         print(f"Simulation completed at t={self.current_time:.2f}s")
@@ -193,7 +291,7 @@ class SimulationEngine:
             f"Completed {completed}/{total_requests} requests ({completion_rate:.1f}%)"
         )
 
-        if completed < total_requests:
+        if total_requests and completed < total_requests:
             stuck = total_requests - completed
             print(
                 f"WARNING: {stuck} requests did not complete (insufficient resources)"
@@ -204,6 +302,16 @@ class SimulationEngine:
         if self.request_trace_logger:
             self.request_trace_logger.finalize()
 
+        # Generate time-series plots
+        if self.time_series_monitor:
+            self.time_series_monitor.finalize()
+            self.time_series_monitor.generate_plots()
+
+        # Generate memory profiling report
+        if self.memory_profiler.enabled:
+            self.memory_profiler.report(output_path="memory_profile.csv")
+            self.memory_profiler.stop()
+
         return self.metrics_collector.finalize(
             total_time=self.current_time,
             num_prefill=self.config.num_prefill_instances,
@@ -212,17 +320,37 @@ class SimulationEngine:
 
     def _initialize_workload(self):
         """Load workload trace and schedule arrival events."""
-        requests = self.workload_driver.load_trace()
+        if self.streaming_enabled:
+            # Streaming mode: load only first window
+            self.workload_driver.open()
+            requests = self.workload_driver.load_initial_window()
+            total_requests = -1  # Unknown total, will be determined at end
 
-        for req in requests:
-            event = Event(
-                timestamp=req.arrival_time,
-                event_type=EventType.REQUEST_ARRIVAL,
-                data={"request": req},
-            )
-            heapq.heappush(self.event_queue, event)
+            # Schedule initial window events
+            for req in requests:
+                event = Event(
+                    timestamp=req.arrival_time,
+                    event_type=EventType.REQUEST_ARRIVAL,
+                    data={"request": req},
+                )
+                heapq.heappush(self.event_queue, event)
 
-        return requests
+            print(f"[Streaming] Loaded initial window: {len(requests)} requests")
+            # Return empty list to signal unknown total
+            return []
+        else:
+            # Traditional mode: load all requests at once
+            requests = self.workload_driver.load_trace()
+
+            for req in requests:
+                event = Event(
+                    timestamp=req.arrival_time,
+                    event_type=EventType.REQUEST_ARRIVAL,
+                    data={"request": req},
+                )
+                heapq.heappush(self.event_queue, event)
+
+            return requests
 
     def _load_switch_schedule(self, schedule: List[dict]):
         """Load role switch schedule and create ROLE_SWITCH events.
@@ -277,6 +405,9 @@ class SimulationEngine:
         Mirrors real SGLang's _allocatable_tokens() in decode.py.
         Accounts for physical available tokens, virtual reservations for
         bootstrapped requests, and per-request decode token reserves.
+
+        Improved (SGLang-style): Only reserve for ACTIVE requests (running/transfer),
+        not for requests already waiting for memory (waiting/prealloc queues).
         """
         available = decode_instance.token_to_kv_pool.available_size()
 
@@ -284,22 +415,18 @@ class SimulationEngine:
         for req in decode_instance.prealloc_reserved:
             available -= req.context_tokens + len(req.output_ids)
 
-        # Count all in-flight requests on this decode instance
+        # Count ONLY active in-flight requests (SGLang pattern)
+        # Don't count waiting/prealloc - they're already blocked waiting for memory
         num_running = len(decode_instance.running_batch.reqs)
         num_transfer = len(decode_instance.transfer_queue)
-        num_waiting = len(decode_instance.waiting_queue)
-        num_prealloc_waiting = len(decode_instance.prealloc_queue)
-        num_reserved = len(decode_instance.prealloc_reserved)
 
-        num_inflight = (
-            num_running + num_transfer + num_waiting
-            + num_prealloc_waiting + num_reserved
-        )
+        num_active_inflight = num_running + num_transfer
 
-        # Reserve decode tokens for all in-flight requests
-        reserved_tokens = self.config.num_reserved_decode_tokens * num_inflight
+        # Reserve decode tokens only for active requests
+        # This prevents over-reservation and allows more bootstrap admissions
+        reserved_tokens = self.config.num_reserved_decode_tokens * num_active_inflight
 
-        return available - reserved_tokens
+        return max(0, available - reserved_tokens)
 
     def _select_best_decode_instance(self):
         """Select decode instance with most allocatable tokens (least-loaded).
@@ -324,19 +451,20 @@ class SimulationEngine:
     def _try_admit_from_bootstrap(self, prefill_instance: PrefillInstance) -> List[Event]:
         """Try to admit requests from bootstrap_queue to waiting_queue.
 
-        For each request in FIFO order, checks if target decode instance
-        has capacity. If so, virtually reserves tokens and moves request
-        to prefill waiting_queue. Mirrors real SGLang's pop_bootstrapped()
-        and pop_preallocated() handshake.
+        SGLang-style skip-and-continue pattern: if a request doesn't fit,
+        skip it and try the next one. This prevents head-of-line blocking.
+        Skipped requests are moved to the end of the queue for fair retry.
         """
         # Don't admit if draining
         if not prefill_instance.accepting_requests:
             return []
 
         admitted_any = False
+        requests_to_requeue = []  # Requests that don't fit now, retry later
 
-        while prefill_instance.bootstrap_queue:
-            req = prefill_instance.bootstrap_queue[0]
+        # Process all requests in current bootstrap queue
+        for req in list(prefill_instance.bootstrap_queue):
+            prefill_instance.bootstrap_queue.remove(req)
 
             # Select decode instance (least-loaded by allocatable tokens)
             if req.assigned_decode_instance is not None:
@@ -352,38 +480,69 @@ class SimulationEngine:
             else:
                 decode_instance = self._select_best_decode_instance()
 
-            # No available decode instance (all draining)
+            # No available decode instance (all draining) - requeue all remaining
             if decode_instance is None:
-                break
+                requests_to_requeue.append(req)
+                continue
+
+            # Check if request is oversized (permanent failure)
+            max_possible = max(
+                decode_inst.token_to_kv_pool.total_kv_tokens
+                for decode_inst in self.instance_manager.decode_instances
+            )
+            if req.context_tokens > max_possible:
+                # Drop permanently - request can NEVER fit
+                self.metrics_collector.record_dropped_request(req, "oversized")
+                self.logger.warning(
+                    f"Dropping oversized request {req.rid}: "
+                    f"{req.context_tokens} > {max_possible} tokens"
+                )
+                continue
 
             # Check decode capacity
             allocatable = self._decode_allocatable_tokens(decode_instance)
             tokens_needed = req.context_tokens + self.config.num_reserved_decode_tokens
 
-            if tokens_needed > allocatable:
-                # Check if request can NEVER fit (too large for any instance)
-                max_possible = max(
-                    decode_inst.token_to_kv_pool.total_kv_tokens
-                    for decode_inst in self.instance_manager.decode_instances
-                )
-                if req.context_tokens > max_possible:
-                    # Skip this request to avoid permanent blocking
-                    prefill_instance.bootstrap_queue.pop(0)
-                    continue
-                break  # FIFO: head blocks tail
+            if tokens_needed <= allocatable:
+                # Admit: move to waiting queue, add virtual reservation
+                decode_instance.prealloc_reserved.append(req)
+                req.assigned_decode_instance = decode_instance.instance_id
+                prefill_instance.add_request(req)  # adds to waiting_queue
+                req.bootstrap_exit_time = self.current_time
+                admitted_any = True
+            else:
+                # Can't fit now - SKIP to next request (SGLang pattern)
+                # Will be requeued to end for fair retry
+                requests_to_requeue.append(req)
 
-            # Admit: move from bootstrap to waiting, add virtual reservation
-            prefill_instance.bootstrap_queue.pop(0)
-            decode_instance.prealloc_reserved.append(req)
-            req.assigned_decode_instance = decode_instance.instance_id
-            prefill_instance.add_request(req)  # adds to waiting_queue
-            req.bootstrap_exit_time = self.current_time
-            admitted_any = True
+        # Requeue skipped requests to END of queue (fairness)
+        prefill_instance.bootstrap_queue.extend(requests_to_requeue)
 
         # If we admitted anything, try to schedule prefill
         if admitted_any:
             return self._try_schedule_prefill(prefill_instance)
         return []
+
+    def _abort_bootstrap_on_timeout(self, prefill_instance: PrefillInstance) -> None:
+        """Abort requests that have been stuck in bootstrap queue too long.
+
+        SGLang-style timeout check: similar to _abort_on_waiting_timeout().
+        Uses lazy initialization of _bootstrap_entry_time attribute.
+        """
+        timeout_seconds = self.config.bootstrap_timeout_seconds
+        if timeout_seconds <= 0:
+            return  # Timeout disabled
+
+        for req in list(prefill_instance.bootstrap_queue):
+            # Lazy init: track first time in bootstrap queue
+            if not hasattr(req, '_bootstrap_entry_time'):
+                req._bootstrap_entry_time = self.current_time
+
+            elapsed = self.current_time - req._bootstrap_entry_time
+            if elapsed > timeout_seconds:
+                # Timeout exceeded - abort request silently
+                prefill_instance.bootstrap_queue.remove(req)
+                self.metrics_collector.record_dropped_request(req, "bootstrap_timeout")
 
     # ---- REQUEST ARRIVAL ----
 
@@ -473,6 +632,11 @@ class SimulationEngine:
 
         # Accumulate prefill tokens for throughput tracking
         self._interval_prefill_tokens += batch.total_prefill_tokens
+        if self.time_series_monitor:
+            self.time_series_monitor.record_throughput(
+                prefill_tokens=batch.total_prefill_tokens,
+                decode_tokens=0
+            )
 
         # Check which requests are still being chunked
         scheduler = self.prefill_schedulers[instance.instance_id]
@@ -858,6 +1022,11 @@ class SimulationEngine:
 
         # Accumulate decode tokens for throughput tracking
         self._interval_decode_tokens += batch.decode_batch_size
+        if self.time_series_monitor:
+            self.time_series_monitor.record_throughput(
+                prefill_tokens=0,
+                decode_tokens=batch.decode_batch_size
+            )
         self._interval_decode_computed_token_sum += batch.decode_computed_token_sum
         self._interval_decode_batch_count += 1
 
@@ -937,6 +1106,8 @@ class SimulationEngine:
         self.metrics_collector.record_completion(req, self.current_time)
         if self.request_trace_logger:
             self.request_trace_logger.log_request(req)
+        if self.time_series_monitor:
+            self.time_series_monitor.record_completion(req, self.current_time)
 
         # Memory freed — try to schedule waiting requests that were blocked.
         # In real SGLang, completed requests free KV cache which allows
@@ -1184,7 +1355,7 @@ class SimulationEngine:
             return []
 
         if instance.draining:
-            print(f"WARNING: Instance {instance_id} already draining, skipping switch")
+            # Silently skip if already draining
             return []
 
         if instance.instance_type == target_role:
@@ -1474,6 +1645,15 @@ class SimulationEngine:
 
         print(f"[{self.current_time:.3f}s] Role switch complete: "
               f"{instance.instance_id} {old_role.name} → {new_role.name}")
+
+        # Record role switch in monitor
+        if self.time_series_monitor:
+            self.time_series_monitor.record_role_switch(
+                time=self.current_time,
+                instance_id=instance.instance_id,
+                from_role=old_role.name,
+                to_role=new_role.name
+            )
 
         # Update instance state
         instance.instance_type = new_role
