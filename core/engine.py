@@ -114,6 +114,16 @@ class SimulationEngine:
         self._interval_decode_batch_count = 0
         self._interval_start_time = 0.0
 
+        # Multi-threading support (opt-in)
+        self.lp_thread_pool = None
+        if getattr(config, 'enable_parallel_lp_solver', False):
+            from concurrent.futures import ThreadPoolExecutor
+            max_workers = getattr(config, 'lp_solver_max_workers', -1)
+            if max_workers < 0:
+                max_workers = config.num_prefill_instances
+            self.lp_thread_pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="LPSolver")
+            print(f"[MultiThreading] Enabled parallel LP solver with {max_workers} workers")
+
         # Iteration logger (optional)
         self.iteration_logger = None
         self.request_trace_logger = None
@@ -317,6 +327,11 @@ class SimulationEngine:
         if self.memory_profiler.enabled:
             self.memory_profiler.report(output_path="memory_profile.csv")
             self.memory_profiler.stop()
+
+        # Shutdown thread pools
+        if self.lp_thread_pool:
+            self.lp_thread_pool.shutdown(wait=True)
+            print("[MultiThreading] LP solver thread pool shut down")
 
         return self.metrics_collector.finalize(
             total_time=self.current_time,
@@ -1141,9 +1156,23 @@ class SimulationEngine:
                 events.extend(self._try_admit_from_bootstrap(prefill_instance))
 
         # Re-try prefill scheduling on all idle prefill instances
-        for prefill_instance in self.instance_manager.prefill_instances:
-            if not prefill_instance.busy and prefill_instance.waiting_queue:
-                events.extend(self._try_schedule_prefill(prefill_instance))
+        # Use parallel LP solving if enabled
+        idle_instances_with_work = [
+            inst for inst in self.instance_manager.prefill_instances
+            if not inst.busy and inst.waiting_queue
+        ]
+
+        if idle_instances_with_work:
+            if self.lp_thread_pool and len(idle_instances_with_work) > 1:
+                # Parallel LP solving for multiple instances
+                lp_times = self._batch_apply_lp_betas_parallel(idle_instances_with_work)
+                for inst in idle_instances_with_work:
+                    # Schedule batch with pre-computed betas (lp_delay already applied)
+                    events.extend(self._schedule_prefill_batch_after_lp(inst, lp_times.get(inst.instance_id, 0.0)))
+            else:
+                # Sequential processing (original behavior)
+                for inst in idle_instances_with_work:
+                    events.extend(self._try_schedule_prefill(inst))
 
         return events
 
@@ -1162,6 +1191,39 @@ class SimulationEngine:
         lp_delay = 0.0
         if self.policy.dynamic_lp_enabled and instance.waiting_queue:
             lp_delay = self._apply_dynamic_lp_betas(instance)
+
+        scheduler = self.prefill_schedulers[instance.instance_id]
+        batch = scheduler.get_next_batch()
+
+        if batch is None:
+            return []
+
+        instance.busy = True
+
+        return [
+            Event(
+                timestamp=self.current_time + lp_delay,
+                event_type=EventType.PREFILL_BATCH_START,
+                data={"batch": batch, "instance": instance},
+            )
+        ]
+
+    def _schedule_prefill_batch_after_lp(self, instance: PrefillInstance, lp_delay: float) -> List[Event]:
+        """Schedule prefill batch after LP betas have been computed (used in parallel mode).
+
+        Args:
+            instance: Prefill instance to schedule
+            lp_delay: Pre-computed LP solve time
+
+        Returns:
+            List of events (batch start event if successful)
+        """
+        if instance.busy:
+            return []
+
+        # Instance may have switched roles; skip if no longer a prefill instance
+        if instance.instance_id not in self.prefill_schedulers:
+            return []
 
         scheduler = self.prefill_schedulers[instance.instance_id]
         batch = scheduler.get_next_batch()
@@ -1256,6 +1318,36 @@ class SimulationEngine:
             req.lp_beta = 0.0
 
         return solve_time
+
+    def _batch_apply_lp_betas_parallel(self, instances: list) -> dict:
+        """Apply LP betas in parallel across multiple prefill instances.
+
+        Args:
+            instances: List of prefill instances to process
+
+        Returns:
+            Dictionary mapping instance_id to LP solve time
+        """
+        if not self.lp_thread_pool or len(instances) <= 1:
+            # Fall back to sequential if no thread pool or only one instance
+            return {inst.instance_id: self._apply_dynamic_lp_betas(inst) for inst in instances}
+
+        # Submit parallel LP solver tasks
+        futures = {
+            self.lp_thread_pool.submit(self._apply_dynamic_lp_betas, inst): inst
+            for inst in instances
+        }
+
+        # Collect results
+        results = {}
+        for future, inst in futures.items():
+            try:
+                results[inst.instance_id] = future.result()
+            except Exception as e:
+                print(f"[LPSolver] Error solving for {inst.instance_id}: {e}")
+                results[inst.instance_id] = 0.0
+
+        return results
 
     def _get_decode_instance_for_req(self, req: SimReq):
         """Get the decode instance assigned to a request, or None."""
