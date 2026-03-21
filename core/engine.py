@@ -34,7 +34,7 @@ from utils.memory_profiler import MemoryProfiler
 class SimulationEngine:
     """Main discrete-event simulation engine."""
 
-    def __init__(self, config: SimConfig, enable_iteration_logging: bool = True):
+    def __init__(self, config: SimConfig, enable_iteration_logging: bool = False):
         """Initialize simulation engine.
 
         Args:
