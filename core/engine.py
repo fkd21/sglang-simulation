@@ -149,9 +149,13 @@ class SimulationEngine:
             # Generate run name if not already created by iteration logger
             if run_name is None:
                 import datetime
+                import os
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 trace_name = Path(config.trace_path).stem
-                run_name = f"{timestamp}_{config.num_prefill_instances}P{config.num_decode_instances}D_{trace_name}"
+                # Add process ID and microseconds to ensure uniqueness in parallel runs
+                pid = os.getpid()
+                microsec = datetime.datetime.now().strftime("%f")[:3]  # First 3 digits of microseconds (milliseconds)
+                run_name = f"{timestamp}_{microsec}_{config.num_prefill_instances}P{config.num_decode_instances}D_{trace_name}_pid{pid}"
 
             self.time_series_monitor = TimeSeriesMonitor(
                 sample_interval=getattr(config, 'monitoring_sample_interval', 1.0),
