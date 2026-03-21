@@ -129,6 +129,9 @@ class SimulationEngine:
         self.request_trace_logger = None
         self.time_series_monitor = None
         self.iteration_count = 0
+
+        # Determine run name for outputs
+        run_name = None
         if enable_iteration_logging:
             self.iteration_logger = IterationLogger(
                 config=config,
@@ -138,19 +141,28 @@ class SimulationEngine:
             self.request_trace_logger = RequestTraceLogger(
                 self.iteration_logger.output_dir
             )
-            # Initialize time-series monitor with same output directory
-            if getattr(config, 'enable_monitoring', True):
-                self.time_series_monitor = TimeSeriesMonitor(
-                    sample_interval=getattr(config, 'monitoring_sample_interval', 1.0),
-                    max_samples=getattr(config, 'monitoring_max_samples', 10000),
-                    sla_window_size=getattr(config, 'monitoring_sla_window', 1000),
-                    ttft_sla=getattr(config, 'ttft_sla', 1.0),
-                    itl_sla=getattr(config, 'itl_sla', 0.1),
-                    output_dir="result",
-                    run_name=self.iteration_logger.run_name,
-                    enable_periodic_plots=getattr(config, 'enable_periodic_plots', True),
-                    plot_interval_minutes=getattr(config, 'monitoring_plot_interval_minutes', 15.0),
-                )
+            run_name = self.iteration_logger.run_name
+
+        # Initialize time-series monitor (independent of iteration logging)
+        if getattr(config, 'enable_monitoring', True):
+            # Generate run name if not already created by iteration logger
+            if run_name is None:
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                trace_name = Path(config.trace_path).stem
+                run_name = f"{timestamp}_{config.num_prefill_instances}P{config.num_decode_instances}D_{trace_name}"
+
+            self.time_series_monitor = TimeSeriesMonitor(
+                sample_interval=getattr(config, 'monitoring_sample_interval', 1.0),
+                max_samples=getattr(config, 'monitoring_max_samples', 10000),
+                sla_window_size=getattr(config, 'monitoring_sla_window', 1000),
+                ttft_sla=getattr(config, 'ttft_sla', 1.0),
+                itl_sla=getattr(config, 'itl_sla', 0.1),
+                output_dir="result",
+                run_name=run_name,
+                enable_periodic_plots=getattr(config, 'enable_periodic_plots', True),
+                plot_interval_minutes=getattr(config, 'monitoring_plot_interval_minutes', 15.0),
+            )
 
         # Resolve chunked prefill size
         chunked_prefill_size = None
