@@ -26,15 +26,15 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 def _run_one(args: Tuple) -> Dict[str, Any]:
     """Worker function for parallel execution."""
     config, label, extras = args
-    print(f"[START] Running simulation: {label}")
-    print(f"  - Policy: {extras.get('policy', 'N/A')}")
-    print(f"  - Offload mode: {extras.get('offload_mode', 'N/A')}")
-    print(f"  - Switching: {config.enable_switching}, Protection: {config.enable_decode_protection}")
+    print(f"[START] Running simulation: {label}", flush=True)
+    print(f"  - Policy: {extras.get('policy', 'N/A')}", flush=True)
+    print(f"  - Offload mode: {extras.get('offload_mode', 'N/A')}", flush=True)
+    print(f"  - Switching: {config.enable_switching}, Protection: {config.enable_decode_protection}", flush=True)
 
     engine = SimulationEngine(config)
-    print(f"[SIMULATING] {label} - engine created, starting simulation...")
+    print(f"[SIMULATING] {label} - engine created, starting simulation...", flush=True)
     results = engine.run()
-    print(f"[DONE] {label} - simulation completed")
+    print(f"[DONE] {label} - simulation completed", flush=True)
 
     d = results.to_dict()
     d["label"] = label
@@ -157,6 +157,9 @@ def experiment_switching_offload_4p4d(max_workers: Optional[int] = None) -> List
             enable_streaming_loading=True,
             streaming_window_size=300.0,  # 5 minutes
             streaming_lookback=60.0,       # 1 minute safety buffer
+            # Enable monitoring and periodic plots
+            enable_monitoring=True,
+            monitoring_plot_interval_minutes=15.0,
         )
         tasks.append((
             config,
@@ -180,6 +183,9 @@ def experiment_switching_offload_4p4d(max_workers: Optional[int] = None) -> List
             enable_streaming_loading=True,
             streaming_window_size=300.0,  # 5 minutes
             streaming_lookback=60.0,       # 1 minute safety buffer
+            # Enable monitoring and periodic plots
+            enable_monitoring=True,
+            monitoring_plot_interval_minutes=15.0,
         )
         tasks.append((
             config,
@@ -204,6 +210,9 @@ def experiment_switching_offload_4p4d(max_workers: Optional[int] = None) -> List
             enable_streaming_loading=True,
             streaming_window_size=300.0,  # 5 minutes
             streaming_lookback=60.0,       # 1 minute safety buffer
+            # Enable monitoring and periodic plots
+            enable_monitoring=True,
+            monitoring_plot_interval_minutes=15.0,
         )
         tasks.append((
             config,
