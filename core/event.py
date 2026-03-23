@@ -37,6 +37,7 @@ class EventType(Enum):
     ROLE_SWITCH = auto()
     SWITCH_UNBLOCK = auto()
     MONITOR_EVAL = auto()  # Periodic policy monitor evaluation
+    BOOTSTRAP_TIMEOUT_CHECK = auto()  # Periodic bootstrap queue timeout check
     # Streaming workload loading
     LOAD_WINDOW_CHECK = auto()  # Check if next time window should be loaded
 

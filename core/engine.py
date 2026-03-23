@@ -131,6 +131,13 @@ class SimulationEngine:
         self.time_series_monitor = None
         self.iteration_count = 0
 
+        # Idle detection for hung simulation detection
+        self._idle_event_counter = 0
+
+        # Deadlock detection: track simulation time progress without work
+        self._last_active_time = 0.0  # Last time we saw actual work (completion or drop)
+        self._last_total_processed = 0  # completed + dropped
+
         # Determine run name for outputs
         run_name = None
         if enable_iteration_logging:
@@ -168,6 +175,14 @@ class SimulationEngine:
                 enable_periodic_plots=getattr(config, 'enable_periodic_plots', True),
                 plot_interval_minutes=getattr(config, 'monitoring_plot_interval_minutes', 15.0),
             )
+
+            # Save config.json alongside monitoring data
+            import json
+            from dataclasses import asdict
+            config_path = self.time_series_monitor.output_dir / "config.json"
+            with open(config_path, 'w') as f:
+                json.dump(asdict(config), f, indent=2)
+            print(f"[Config] Saved config to {config_path}")
 
         # Resolve chunked prefill size
         chunked_prefill_size = None
@@ -208,6 +223,72 @@ class SimulationEngine:
             )
             heapq.heappush(self.event_queue, event)
 
+        # Schedule periodic bootstrap timeout checks
+        if self.config.bootstrap_timeout_seconds > 0:
+            timeout_check_interval = getattr(config, 'bootstrap_timeout_check_interval', 10.0)
+            event = Event(
+                timestamp=timeout_check_interval,
+                event_type=EventType.BOOTSTRAP_TIMEOUT_CHECK,
+                data={},
+            )
+            heapq.heappush(self.event_queue, event)
+
+    def _all_queues_empty(self) -> bool:
+        """Check if all instance queues are empty.
+
+        Returns:
+            True if all queues are empty, False otherwise
+        """
+        for instance in (self.instance_manager.prefill_instances +
+                        self.instance_manager.decode_instances):
+            if (len(instance.waiting_queue) > 0 or
+                len(instance.running_batch.reqs) > 0 or
+                len(getattr(instance, 'bootstrap_queue', [])) > 0 or
+                len(getattr(instance, 'transfer_queue', [])) > 0 or
+                len(getattr(instance, 'prealloc_queue', [])) > 0):
+                return False
+        return True
+
+    def _should_continue_monitoring(self) -> bool:
+        """Check if monitoring should continue.
+
+        Stops monitoring when:
+        1. Trace is exhausted (in streaming mode) or fully loaded (non-streaming)
+        2. All requests are completed or dropped
+
+        Returns:
+            True if monitoring should continue, False to stop scheduling MONITOR_EVAL
+        """
+        # Get current completion counts
+        if self.metrics_collector.enable_streaming:
+            completed = self.metrics_collector.num_completions
+        else:
+            completed = len(self.metrics_collector.completions)
+
+        dropped = len(self.metrics_collector.dropped_requests)
+        total_processed = completed + dropped
+
+        # In streaming mode, check if trace exhausted
+        if self.streaming_enabled:
+            # Still loading requests - continue monitoring
+            if not hasattr(self, 'trace_exhausted'):
+                return True
+
+            if not self.trace_exhausted:
+                return True
+
+            # Trace exhausted - check if all requests processed
+            total_requests = self.workload_driver.total_requests_loaded
+        else:
+            # Non-streaming mode - all requests loaded upfront
+            total_requests = self.workload_driver.total_requests_loaded
+
+        # Stop monitoring if all requests processed
+        if total_requests is not None and total_processed >= total_requests:
+            return False
+
+        return True
+
     def run(self) -> SimulationResults:
         """Run simulation until ALL requests complete.
 
@@ -234,9 +315,11 @@ class SimulationEngine:
         if self.streaming_enabled:
             total_requests = None  # Unknown in streaming mode
             trace_exhausted = False
+            self.trace_exhausted = False  # Instance variable for _should_continue_monitoring()
         else:
             total_requests = len(requests)
             trace_exhausted = True  # All loaded upfront
+            self.trace_exhausted = True  # Instance variable for _should_continue_monitoring()
 
         # Start periodic plot generation (wall-clock timer thread)
         if self.time_series_monitor:
@@ -265,6 +348,7 @@ class SimulationEngine:
                     # Check if trace is exhausted
                     if self.workload_driver.trace_exhausted:
                         trace_exhausted = True
+                        self.trace_exhausted = True  # Instance variable for _should_continue_monitoring()
                         total_requests = self.workload_driver.total_requests_loaded
                         print(f"[Streaming] Trace exhausted. Total requests: {total_requests}")
 
@@ -289,18 +373,65 @@ class SimulationEngine:
                 }
                 self.time_series_monitor.maybe_sample(self.current_time, engine_state)
 
-            # Check bootstrap queue timeouts (SGLang-style)
-            for prefill_inst in self.instance_manager.prefill_instances:
-                self._abort_bootstrap_on_timeout(prefill_inst)
+            # Check for idle state (all queues empty but event queue has events)
+            # In streaming mode, only terminate if trace is exhausted
+            should_check_idle = (
+                self._all_queues_empty() and self.event_queue and
+                (not self.streaming_enabled or trace_exhausted)
+            )
+            if should_check_idle:
+                self._idle_event_counter += 1
+                idle_events_threshold = 100
+                if self._idle_event_counter >= idle_events_threshold:
+                    print(f"[TERMINATION] All queues empty for {idle_events_threshold} consecutive events - stopping simulation")
+                    break
+            else:
+                self._idle_event_counter = 0
 
             # Check completion condition
             completed = (self.metrics_collector.num_completions
                         if self.metrics_collector.enable_streaming
                         else len(self.metrics_collector.completions))
 
-            # In streaming mode, only break when trace is exhausted AND all completed
-            if total_requests is not None and completed >= total_requests:
-                print(f"All {total_requests} requests completed!")
+            num_dropped = len(self.metrics_collector.dropped_requests)
+
+            # Deadlock detection: check if simulation time is advancing but no work is being done
+            # This catches cases where requests are stuck in queues forever
+            current_total_processed = completed + num_dropped
+            if current_total_processed > self._last_total_processed:
+                # Progress made, update tracking
+                self._last_active_time = self.current_time
+                self._last_total_processed = current_total_processed
+            else:
+                # No progress, check if we've been stuck too long
+                time_since_progress = self.current_time - self._last_active_time
+                if time_since_progress > 300.0:  # 300 simulation seconds (5 minutes) without any completion/drop
+                    # Check if there are requests stuck in queues
+                    total_in_queues = sum(
+                        len(inst.waiting_queue) + len(inst.running_batch.reqs) +
+                        len(getattr(inst, 'bootstrap_queue', [])) +
+                        len(getattr(inst, 'transfer_queue', [])) +
+                        len(getattr(inst, 'prealloc_queue', []))
+                        for inst in (self.instance_manager.prefill_instances +
+                                   self.instance_manager.decode_instances)
+                    )
+                    if total_in_queues > 0:
+                        print(f"[TERMINATION] Deadlock detected after {time_since_progress:.0f}s simulation time with no progress")
+                        print(f"  {total_in_queues} requests stuck in queues, {completed} completed, {num_dropped} dropped")
+                        # Print queue details for debugging
+                        for inst in (self.instance_manager.prefill_instances + self.instance_manager.decode_instances):
+                            queued = (len(inst.waiting_queue) + len(inst.running_batch.reqs) +
+                                    len(getattr(inst, 'bootstrap_queue', [])))
+                            if queued > 0:
+                                print(f"  {inst.instance_id}: waiting={len(inst.waiting_queue)}, "
+                                     f"running={len(inst.running_batch.reqs)}, "
+                                     f"bootstrap={len(getattr(inst, 'bootstrap_queue', []))}")
+                        break
+
+            # In streaming mode, only break when trace is exhausted AND all processed
+            # Include dropped requests in the count to avoid hanging when requests timeout
+            if total_requests is not None and (completed + num_dropped) >= total_requests:
+                print(f"All {total_requests} requests processed (completed: {completed}, dropped: {num_dropped})!")
                 break
 
         # Get final completion count
@@ -428,6 +559,7 @@ class SimulationEngine:
             EventType.ROLE_SWITCH: self._handle_role_switch,
             EventType.SWITCH_UNBLOCK: self._handle_switch_unblock,
             EventType.MONITOR_EVAL: self._handle_monitor_eval,
+            EventType.BOOTSTRAP_TIMEOUT_CHECK: self._handle_bootstrap_timeout_check,
         }
 
         handler = handlers.get(event.event_type)
@@ -564,8 +696,11 @@ class SimulationEngine:
     def _abort_bootstrap_on_timeout(self, prefill_instance: PrefillInstance) -> None:
         """Abort requests that have been stuck in bootstrap queue too long.
 
-        SGLang-style timeout check: similar to _abort_on_waiting_timeout().
+        Called periodically via BOOTSTRAP_TIMEOUT_CHECK event (every 10s by default).
         Uses lazy initialization of _bootstrap_entry_time attribute.
+
+        Note: Timed-out requests may remain in queue for up to
+        bootstrap_timeout_check_interval seconds after exceeding the timeout threshold.
         """
         timeout_seconds = self.config.bootstrap_timeout_seconds
         if timeout_seconds <= 0:
@@ -1577,7 +1712,16 @@ class SimulationEngine:
         return migrated_count, events
 
     def _migrate_prefill_bootstrap_queue(self, source: PrefillInstance) -> int:
-        """Migrate bootstrap queue requests with priority (batched)."""
+        """Migrate prefill bootstrap queue requests to other prefill instances.
+
+        If migration fails (no available targets), drop requests with reason.
+
+        Args:
+            source: Source prefill instance being switched
+
+        Returns:
+            Number of successfully migrated requests
+        """
         if not source.bootstrap_queue:
             return 0
 
@@ -1585,15 +1729,17 @@ class SimulationEngine:
         requests = source.bootstrap_queue[:]
         source.bootstrap_queue.clear()
 
-        count = 0
-        unmigrated = []
+        migrated_count = 0
+        failed_migrations = []
+
         for req in requests:
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.PREFILL, source.instance_id
             )
+
             if target is None:
-                print(f"  WARNING: Cannot migrate req {req.rid}, no available instances")
-                unmigrated.append(req)
+                print(f"  WARNING: Cannot migrate req {req.rid}, no available prefill instances")
+                failed_migrations.append(req)
                 continue
 
             req.migrated_from_switch = True
@@ -1602,41 +1748,76 @@ class SimulationEngine:
 
             # Insert at head for priority
             target.bootstrap_queue.insert(0, req)
-            count += 1
+            migrated_count += 1
 
-        # Put back any unmigrated requests
-        source.bootstrap_queue.extend(unmigrated)
-        return count
+        # Handle failed migrations - drop with clear reason
+        if failed_migrations:
+            print(f"  WARNING: {len(failed_migrations)} prefill bootstrap_queue migrations failed - dropping")
+
+            for req in failed_migrations:
+                self.metrics_collector.record_dropped_request(req, "migration_failed_no_prefill")
+
+        return migrated_count
 
     def _migrate_prefill_waiting_queue(self, source: PrefillInstance) -> int:
-        """Migrate waiting queue requests with priority (batched)."""
+        """Migrate prefill waiting queue requests to other prefill instances.
+
+        If migration fails (no available targets), drop requests with reason.
+
+        Args:
+            source: Source prefill instance being switched
+
+        Returns:
+            Number of successfully migrated requests
+        """
         if not source.waiting_queue:
             return 0
 
         requests = source.waiting_queue[:]
         source.waiting_queue.clear()
 
-        count = 0
-        unmigrated = []
+        migrated_count = 0
+        failed_migrations = []
+
+        print(f"  Migrating {len(requests)} prefill waiting_queue requests from {source.instance_id}")
+
         for req in requests:
+            # Try to find target prefill instance
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.PREFILL, source.instance_id
             )
+
             if target is None:
-                unmigrated.append(req)
+                # No available prefill instance - mark for dropping
+                failed_migrations.append(req)
                 continue
 
+            # Free memory on source
             source.free_memory(req)
 
+            # Mark as migrated
             req.migrated_from_switch = True
             req.migration_timestamp = self.current_time
             req.assigned_prefill_instance = target.instance_id
 
+            # Insert at front of target waiting_queue (priority)
             target.waiting_queue.insert(0, req)
-            count += 1
+            migrated_count += 1
 
-        source.waiting_queue.extend(unmigrated)
-        return count
+        # Handle failed migrations - drop with clear reason
+        if failed_migrations:
+            print(f"  WARNING: {len(failed_migrations)} prefill waiting_queue migrations failed")
+            print(f"  No accepting prefill instances available - dropping requests")
+
+            for req in failed_migrations:
+                # Free memory on source
+                source.free_memory(req)
+
+                # Drop with clear reason
+                print(f"    Dropping req {req.rid} - no prefill targets available")
+                self.metrics_collector.record_dropped_request(req, "migration_failed_no_prefill")
+
+        return migrated_count
 
     def _migrate_decode_prealloc_reserved(self, source: DecodeInstance) -> int:
         """Migrate virtual reservations (batched)."""
@@ -1667,21 +1848,32 @@ class SimulationEngine:
         return count
 
     def _migrate_decode_prealloc_queue(self, source: DecodeInstance) -> int:
-        """Migrate prealloc queue requests (batched)."""
+        """Migrate decode prealloc queue requests to other decode instances.
+
+        If migration fails, re-route requests through prefill admission.
+
+        Args:
+            source: Source decode instance being switched
+
+        Returns:
+            Number of successfully migrated requests
+        """
         if not source.prealloc_queue:
             return 0
 
         requests = source.prealloc_queue[:]
         source.prealloc_queue.clear()
 
-        count = 0
-        unmigrated = []
+        migrated_count = 0
+        failed_migrations = []
+
         for req in requests:
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.DECODE, source.instance_id
             )
+
             if target is None:
-                unmigrated.append(req)
+                failed_migrations.append(req)
                 continue
 
             req.migrated_from_switch = True
@@ -1689,40 +1881,106 @@ class SimulationEngine:
             req.assigned_decode_instance = target.instance_id
 
             target.prealloc_queue.insert(0, req)
-            count += 1
+            migrated_count += 1
 
-        source.prealloc_queue.extend(unmigrated)
-        return count
+        # Handle failed migrations by re-routing through prefill
+        if failed_migrations:
+            print(f"  WARNING: {len(failed_migrations)} decode prealloc_queue migrations failed, re-routing...")
+
+            for req in failed_migrations:
+                # Reset request state for re-admission
+                req.assigned_decode_instance = None
+                req.stage = RequestStage.PREFILL_WAITING
+
+                # Find accepting prefill instance
+                prefill_candidates = [
+                    pi for pi in self.instance_manager.prefill_instances
+                    if pi.accepting_requests and not pi.draining
+                ]
+
+                if prefill_candidates:
+                    target_prefill = prefill_candidates[0]
+                    target_prefill.bootstrap_queue.append(req)
+                else:
+                    self.metrics_collector.record_dropped_request(req, "migration_failed_no_prefill")
+
+        return migrated_count
 
     def _migrate_decode_waiting_queue(self, source: DecodeInstance) -> int:
-        """Migrate decode waiting queue requests (batched)."""
+        """Migrate decode waiting queue requests to other decode instances.
+
+        If migration fails, re-route requests through prefill admission.
+
+        Args:
+            source: Source decode instance being switched
+
+        Returns:
+            Number of successfully migrated requests
+        """
         if not source.waiting_queue:
             return 0
 
         requests = source.waiting_queue[:]
         source.waiting_queue.clear()
 
-        count = 0
-        unmigrated = []
+        migrated_count = 0
+        failed_migrations = []
+
+        print(f"  Migrating {len(requests)} waiting_queue requests from {source.instance_id}")
+
         for req in requests:
+            # Try to find target decode instance
             target = self.instance_manager.select_instance_for_migrated(
                 InstanceType.DECODE, source.instance_id
             )
+
             if target is None:
-                unmigrated.append(req)
+                # No available decode instance - mark for re-routing
+                failed_migrations.append(req)
                 continue
 
+            # Free memory on source
             source.free_memory(req)
 
+            # Mark as migrated
             req.migrated_from_switch = True
             req.migration_timestamp = self.current_time
             req.assigned_decode_instance = target.instance_id
 
+            # Insert at front of target waiting_queue (priority)
             target.waiting_queue.insert(0, req)
-            count += 1
+            migrated_count += 1
 
-        source.waiting_queue.extend(unmigrated)
-        return count
+        # Handle failed migrations by re-routing through prefill
+        if failed_migrations:
+            print(f"  WARNING: {len(failed_migrations)} decode waiting_queue migrations failed")
+            print(f"  Re-routing through prefill admission...")
+
+            for req in failed_migrations:
+                # Free memory on source
+                source.free_memory(req)
+
+                # Reset request state for re-admission
+                req.assigned_decode_instance = None
+                req.stage = RequestStage.PREFILL_WAITING
+
+                # Find accepting prefill instance
+                prefill_candidates = [
+                    pi for pi in self.instance_manager.prefill_instances
+                    if pi.accepting_requests and not pi.draining
+                ]
+
+                if prefill_candidates:
+                    # Use first available (could be improved to least loaded)
+                    target_prefill = prefill_candidates[0]
+                    target_prefill.bootstrap_queue.append(req)
+                    print(f"    Re-routed req {req.rid} to {target_prefill.instance_id} bootstrap_queue")
+                else:
+                    # No accepting prefill - drop the request
+                    print(f"    ERROR: No accepting prefill instances - dropping req {req.rid}")
+                    self.metrics_collector.record_dropped_request(req, "migration_failed_no_prefill")
+
+        return migrated_count
 
     def _complete_drain(self, instance) -> List[Event]:
         """Complete drain process after running_batch becomes empty.
@@ -1829,6 +2087,97 @@ class SimulationEngine:
             # Add to prefill list
             self.instance_manager.prefill_instances.append(instance)
 
+        # CRITICAL: Check for orphaned requests before removing old scheduler
+        orphaned_requests = []
+
+        if old_role == InstanceType.DECODE:
+            # Check decode-specific queues
+            if instance.waiting_queue:
+                orphaned_requests.extend(list(instance.waiting_queue))
+            if instance.prealloc_queue:
+                orphaned_requests.extend(list(instance.prealloc_queue))
+            if instance.prealloc_reserved:
+                orphaned_requests.extend(list(instance.prealloc_reserved))
+
+            if orphaned_requests:
+                print(f"  ⚠️  CRITICAL: Found {len(orphaned_requests)} orphaned DECODE requests!")
+                print(f"  Recovering orphans before scheduler removal...")
+
+                # Clear queues to prevent double-processing
+                instance.waiting_queue.clear()
+                instance.prealloc_queue.clear()
+                instance.prealloc_reserved.clear()
+
+                # Try to re-route each orphaned request
+                for req in orphaned_requests:
+                    # Free memory on this instance
+                    instance.free_memory(req)
+
+                    # Try to find another decode instance
+                    other_decodes = [
+                        d for d in self.instance_manager.decode_instances
+                        if d.instance_id != instance.instance_id and not d.draining
+                    ]
+
+                    if other_decodes:
+                        # Send to least loaded decode instance
+                        target = min(other_decodes, key=lambda d: len(d.waiting_queue))
+                        req.assigned_decode_instance = target.instance_id
+                        target.waiting_queue.insert(0, req)
+                        print(f"    Recovered req {req.rid} → {target.instance_id} waiting_queue")
+                    else:
+                        # No other decode instances available - send back to prefill
+                        print(f"    No decode instances - sending req {req.rid} back to prefill")
+                        req.assigned_decode_instance = None
+                        req.stage = RequestStage.PREFILL_WAITING
+
+                        prefill_targets = [
+                            p for p in self.instance_manager.prefill_instances
+                            if p.accepting_requests and not p.draining
+                        ]
+
+                        if prefill_targets:
+                            target_prefill = prefill_targets[0]
+                            target_prefill.bootstrap_queue.append(req)
+                            print(f"    Recovered req {req.rid} → {target_prefill.instance_id} bootstrap_queue")
+                        else:
+                            # Last resort - drop with clear reason
+                            print(f"    ERROR: No targets available - dropping req {req.rid}")
+                            self.metrics_collector.record_dropped_request(req, "switch_orphaned")
+
+        elif old_role == InstanceType.PREFILL:
+            # Check prefill-specific queues
+            if instance.waiting_queue:
+                orphaned_requests.extend(list(instance.waiting_queue))
+            if instance.bootstrap_queue:
+                orphaned_requests.extend(list(instance.bootstrap_queue))
+
+            if orphaned_requests:
+                print(f"  ⚠️  CRITICAL: Found {len(orphaned_requests)} orphaned PREFILL requests!")
+                print(f"  Recovering orphans before scheduler removal...")
+
+                instance.waiting_queue.clear()
+                instance.bootstrap_queue.clear()
+
+                for req in orphaned_requests:
+                    instance.free_memory(req)
+
+                    # Try other prefill instances
+                    other_prefills = [
+                        p for p in self.instance_manager.prefill_instances
+                        if p.instance_id != instance.instance_id
+                        and p.accepting_requests
+                        and not p.draining
+                    ]
+
+                    if other_prefills:
+                        target = min(other_prefills, key=lambda p: len(p.bootstrap_queue))
+                        target.bootstrap_queue.insert(0, req)
+                        print(f"    Recovered req {req.rid} → {target.instance_id} bootstrap_queue")
+                    else:
+                        print(f"    ERROR: No prefill targets - dropping req {req.rid}")
+                        self.metrics_collector.record_dropped_request(req, "switch_orphaned")
+
         # Recreate scheduler for new role
         if new_role == InstanceType.PREFILL:
             # Resolve chunked prefill size
@@ -1933,13 +2282,57 @@ class SimulationEngine:
             interval_metrics=interval_metrics,
         )
 
-        # Schedule next monitor evaluation
-        next_eval_event = Event(
-            timestamp=self.current_time + self.config.monitor_interval_s,
-            event_type=EventType.MONITOR_EVAL,
-            data={},
-        )
+        # Initialize events list
+        events = []
 
-        events = [next_eval_event]
+        # Proactively schedule idle decode instances with waiting requests
+        # This catches any requests orphaned due to race conditions during
+        # role switching, migration, or drain recovery
+        for decode_inst in self.instance_manager.decode_instances:
+            if not decode_inst.busy and len(decode_inst.waiting_queue) > 0:
+                events.extend(self._try_schedule_decode(decode_inst))
+
+        # Similarly check prefill instances if they have waiting requests
+        for prefill_inst in self.instance_manager.prefill_instances:
+            if not prefill_inst.busy and len(prefill_inst.waiting_queue) > 0:
+                events.extend(self._try_schedule_prefill(prefill_inst))
+
+        # Schedule next monitor evaluation only if simulation still active
+        if self._should_continue_monitoring():
+            next_eval_event = Event(
+                timestamp=self.current_time + self.config.monitor_interval_s,
+                event_type=EventType.MONITOR_EVAL,
+                data={},
+            )
+            events.append(next_eval_event)
+        else:
+            print(f"[MONITOR_EVAL] Stopping at t={self.current_time:.2f}s - all requests processed")
+
         events.extend(switch_events)
+        return events
+
+    def _handle_bootstrap_timeout_check(self, event: Event) -> List[Event]:
+        """Handle periodic bootstrap timeout check.
+
+        Checks all prefill instances' bootstrap queues for timed-out requests.
+        Reschedules itself if simulation is still active.
+
+        Returns:
+            List of events (next timeout check event)
+        """
+        # Check bootstrap queue timeouts for all prefill instances
+        for prefill_inst in self.instance_manager.prefill_instances:
+            self._abort_bootstrap_on_timeout(prefill_inst)
+
+        # Schedule next timeout check only if simulation still active
+        events = []
+        if self._should_continue_monitoring():
+            timeout_check_interval = getattr(self.config, 'bootstrap_timeout_check_interval', 10.0)
+            next_check_event = Event(
+                timestamp=self.current_time + timeout_check_interval,
+                event_type=EventType.BOOTSTRAP_TIMEOUT_CHECK,
+                data={},
+            )
+            events.append(next_check_event)
+
         return events

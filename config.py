@@ -86,13 +86,14 @@ class SimConfig:
     schedule_policy: str = "fcfs"
     max_running_requests: int = 1000 # Max concurrent running requests per instance
     num_reserved_decode_tokens: int = 512  # Per-request decode token reservation for bootstrap gating
-    bootstrap_timeout_seconds: float = 120.0  # Timeout for requests stuck in bootstrap queue (SGLang-style)
+    bootstrap_timeout_seconds: float = 60.0  # Timeout for requests stuck in bootstrap queue (reduced from 120s for faster cleanup)
+    bootstrap_timeout_check_interval: float = 10.0  # How often to check for bootstrap timeouts (seconds)
 
     # Metrics and monitoring
     enable_streaming_metrics: bool = True  # Use O(1) memory streaming statistics
     metrics_reservoir_size: int = 10000  # Reservoir size for percentile sampling
     enable_monitoring: bool = True  # Enable time-series monitoring
-    monitoring_sample_interval: float = 1.0  # Sample interval in simulation seconds
+    monitoring_sample_interval: float = 10.0  # Sample interval in simulation seconds (10s for better performance)
     monitoring_max_samples: int = 10000  # Max samples to keep in memory
     monitoring_sla_window: int = 1000  # Rolling window size for SLA calculation
     enable_iteration_logging: bool = False  # Enable per-instance iteration logging (can be memory/storage intensive)
@@ -100,7 +101,7 @@ class SimConfig:
 
     # Periodic plot generation (wall-clock time)
     enable_periodic_plots: bool = True  # Enable periodic plot generation during simulation
-    monitoring_plot_interval_minutes: float = 15.0  # Wall-clock interval for plot generation (minutes)
+    monitoring_plot_interval_minutes: float = 60.0  # Wall-clock interval for plot generation (60min for less overhead)
 
     # Multi-threading optimizations (opt-in for performance)
     enable_parallel_lp_solver: bool = False  # Parallelize LP solver across prefill instances

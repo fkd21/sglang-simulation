@@ -103,9 +103,9 @@ def calculate_decode_offload_budget(
     # Step 5: Calculate number of decode iterations during one prefill batch
     n_iter = t_prefill / tpot_sla
 
-    # Step 6: Calculate total budget considering D/P ratio
-    dp_ratio = num_decode_instances / num_prefill_instances
-    budget = per_iter_budget * n_iter * dp_ratio
+    # Step 6: Calculate total budget across all decode instances
+    # Budget scales with number of decode instances (total capacity)
+    budget = per_iter_budget * n_iter * num_decode_instances
 
     return max(0.0, budget)
 

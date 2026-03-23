@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,7 +20,7 @@ from core.engine import SimulationEngine
 
 
 # Paths
-AZURE_TRACE_24H = Path(__file__).resolve().parent.parent / "azure_code_24h.csv"
+AZURE_TRACE_24H = Path(__file__).resolve().parent.parent / "azure_code_24h_25.csv"
 AZURE_CODE_WEEK = Path(__file__).resolve().parent.parent / "AzureLLMInferenceTrace_code_1week.csv"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
@@ -27,15 +28,15 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 def _run_one(args: Tuple) -> Dict[str, Any]:
     """Worker function for parallel execution."""
     config, label, extras = args
-    print(f"[START] Running simulation: {label}")
-    print(f"  - Policy: {extras.get('policy', 'N/A')}")
-    print(f"  - Offload mode: {extras.get('offload_mode', 'N/A')}")
-    print(f"  - Switching: {config.enable_switching}, Protection: {config.enable_decode_protection}")
+    print(f"[START] Running simulation: {label}", flush=True)
+    print(f"  - Policy: {extras.get('policy', 'N/A')}", flush=True)
+    print(f"  - Offload mode: {extras.get('offload_mode', 'N/A')}", flush=True)
+    print(f"  - Switching: {config.enable_switching}, Protection: {config.enable_decode_protection}", flush=True)
 
     engine = SimulationEngine(config)
-    print(f"[SIMULATING] {label} - engine created, starting simulation...")
+    print(f"[SIMULATING] {label} - engine created, starting simulation...", flush=True)
     results = engine.run()
-    print(f"[DONE] {label} - simulation completed")
+    print(f"[DONE] {label} - simulation completed", flush=True)
 
     d = results.to_dict()
     d["label"] = label
@@ -93,12 +94,18 @@ def run_parallel(tasks: List[Tuple], max_workers: Optional[int] = None) -> List[
     return results
 
 
+def get_timestamp() -> str:
+    """Get current timestamp string for filenames."""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 def save_experiment(name: str, results: List[Dict]) -> Path:
-    """Save experiment results to JSON."""
+    """Save experiment results to JSON with timestamp."""
     print(f"\n[SAVE] Saving experiment results...")
     out_dir = RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{name}.json"
+    ts = get_timestamp()
+    path = out_dir / f"{ts}_{name}.json"
     print(f"[SAVE] Writing {len(results)} results to {path}")
     with open(path, "w") as f:
         json.dump(results, f, indent=2)
@@ -239,7 +246,7 @@ def main():
 
     print(f"[INIT] Starting experiment 7...")
     r7 = experiment_switching_offload_4p4d(max_workers=workers)
-    save_experiment("exp7_switching_offload_4p4d", r7)
+    save_experiment("exp7_switching_offload_4p4d_25", r7)
 
     print("\n" + "="*80)
     print("✓ ALL EXPERIMENTS COMPLETE!")

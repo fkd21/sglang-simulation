@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -92,12 +93,18 @@ def run_parallel(tasks: List[Tuple], max_workers: Optional[int] = None) -> List[
     return results
 
 
+def get_timestamp() -> str:
+    """Get current timestamp string for filenames."""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 def save_experiment(name: str, results: List[Dict]) -> Path:
-    """Save experiment results to JSON."""
+    """Save experiment results to JSON with timestamp."""
     print(f"\n[SAVE] Saving experiment results...")
     out_dir = RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{name}.json"
+    ts = get_timestamp()
+    path = out_dir / f"{ts}_{name}.json"
     print(f"[SAVE] Writing {len(results)} results to {path}")
     with open(path, "w") as f:
         json.dump(results, f, indent=2)

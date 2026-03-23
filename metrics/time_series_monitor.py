@@ -72,6 +72,7 @@ class TimeSeriesMonitor:
         # Output file for samples (periodic writes)
         self.samples_file = self.output_dir / "time_series_samples.jsonl"
         self.samples_file_handle = None
+        self.sample_count = 0  # Track sample count for batched flushing
 
         # Periodic plot generation (wall-clock timer thread)
         self.enable_periodic_plots = enable_periodic_plots
@@ -230,7 +231,7 @@ class TimeSeriesMonitor:
         }
 
     def _write_sample_to_disk(self, sample: Dict[str, Any]):
-        """Write sample to JSONL file.
+        """Write sample to JSONL file with batched flushing.
 
         Args:
             sample: Sample dictionary
@@ -239,14 +240,21 @@ class TimeSeriesMonitor:
             self.samples_file_handle = open(self.samples_file, 'w')
 
         self.samples_file_handle.write(json.dumps(sample) + '\n')
-        self.samples_file_handle.flush()
+        self.sample_count += 1
+
+        # Flush every 10 samples to reduce I/O overhead
+        if self.sample_count % 10 == 0:
+            self.samples_file_handle.flush()
 
     def start_periodic_plotting(self):
         """Start background thread for periodic plot generation."""
+        import os
         if not self.enable_periodic_plots:
+            print(f"[TimeSeriesMonitor] Periodic plotting disabled (PID {os.getpid()})")
             return
 
         if self.plot_thread is not None and self.plot_thread.is_alive():
+            print(f"[TimeSeriesMonitor] Plot thread already running (PID {os.getpid()})")
             return  # Already running
 
         self.plot_thread_stop.clear()
@@ -254,10 +262,10 @@ class TimeSeriesMonitor:
         self.plot_thread = threading.Thread(
             target=self._periodic_plot_worker,
             name="TimeSeriesMonitor-PlotWorker",
-            daemon=True,
+            daemon=True,  # Daemon to allow clean process exit
         )
         self.plot_thread.start()
-        print(f"[TimeSeriesMonitor] Started periodic plot generation (every {self.plot_interval_minutes} minutes)")
+        print(f"[TimeSeriesMonitor] Started periodic plot generation (every {self.plot_interval_minutes} minutes) in PID {os.getpid()}")
 
     def stop_periodic_plotting(self):
         """Stop background plot thread."""
@@ -274,11 +282,15 @@ class TimeSeriesMonitor:
 
     def _periodic_plot_worker(self):
         """Background worker that generates plots periodically (wall-clock time)."""
-        while not self.plot_thread_stop.wait(timeout=60):  # Check every minute
+        import os
+        print(f"[TimeSeriesMonitor-Worker] Thread started in PID {os.getpid()}")
+        while not self.plot_thread_stop.wait(timeout=30):  # Check every 30 seconds
             elapsed = time.time() - self.last_plot_time
             if elapsed >= self.plot_interval_minutes * 60:
+                print(f"[TimeSeriesMonitor-Worker] Periodic plot trigger (elapsed: {elapsed:.1f}s)")
                 self._generate_plots_safe()
                 self.last_plot_time = time.time()
+        print(f"[TimeSeriesMonitor-Worker] Thread stopped in PID {os.getpid()}")
 
     def _generate_plots_safe(self):
         """Thread-safe plot generation."""
@@ -316,25 +328,29 @@ class TimeSeriesMonitor:
             print("No samples collected, skipping plot generation")
             return
 
-        print(f"Generating time-series plots from {len(self.samples)} samples...")
+        # Create a snapshot to avoid "deque mutated during iteration" errors
+        # The deque can be modified by the main thread while plotting
+        samples_snapshot = list(self.samples)
+
+        print(f"Generating time-series plots from {len(samples_snapshot)} samples...")
 
         try:
-            self._plot_throughput()
-            self._plot_queue_metrics_with_switches()
-            self._plot_sla_attainment()
-            self._plot_memory_usage()
-            self._plot_dropped_requests()
+            self._plot_throughput(samples_snapshot)
+            self._plot_queue_metrics_with_switches(samples_snapshot)
+            self._plot_sla_attainment(samples_snapshot)
+            self._plot_memory_usage(samples_snapshot)
+            self._plot_dropped_requests(samples_snapshot)
             print(f"Plots saved to {self.output_dir}/")
         except Exception as e:
             print(f"Error generating plots: {e}")
             import traceback
             traceback.print_exc()
 
-    def _plot_throughput(self):
+    def _plot_throughput(self, samples):
         """Plot input and output throughput over time."""
-        times = [s['time'] for s in self.samples]
-        input_tp = [s['input_throughput'] for s in self.samples]
-        output_tp = [s['output_throughput'] for s in self.samples]
+        times = [s['time'] for s in samples]
+        input_tp = [s['input_throughput'] for s in samples]
+        output_tp = [s['output_throughput'] for s in samples]
 
         plt.figure(figsize=(12, 6))
         plt.plot(times, input_tp, label='Input Throughput (prefill tokens/s)', linewidth=2)
@@ -342,17 +358,17 @@ class TimeSeriesMonitor:
         plt.xlabel('Simulation Time (s)', fontsize=12)
         plt.ylabel('Throughput (tokens/s)', fontsize=12)
         plt.title('System Throughput Over Time', fontsize=14)
-        plt.legend(fontsize=10)
+        plt.legend(fontsize=10, loc='upper right')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(self.output_dir / 'throughput_over_time.png', dpi=150)
         plt.close()
 
-    def _plot_queue_metrics_with_switches(self):
+    def _plot_queue_metrics_with_switches(self, samples):
         """Plot queue metrics for each instance with role switch markers."""
         # Group samples by instance
         instance_ids = set()
-        for sample in self.samples:
+        for sample in samples:
             instance_ids.update(sample['instances'].keys())
 
         for instance_id in sorted(instance_ids):
@@ -364,7 +380,7 @@ class TimeSeriesMonitor:
             prealloc_queue = []
             prealloc_reserved = []
 
-            for sample in self.samples:
+            for sample in samples:
                 if instance_id in sample['instances']:
                     inst = sample['instances'][instance_id]
                     times.append(sample['time'])
@@ -409,18 +425,18 @@ class TimeSeriesMonitor:
             ax.set_xlabel('Simulation Time (s)', fontsize=12)
             ax.set_ylabel('Queue Length / Batch Size', fontsize=12)
             ax.set_title(f'Queue Metrics - {instance_id}', fontsize=14)
-            ax.legend(fontsize=10)
+            ax.legend(fontsize=10, loc='upper right')
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
             plt.savefig(self.output_dir / f'queue_metrics_{instance_id}.png', dpi=150)
             plt.close()
 
-    def _plot_sla_attainment(self):
+    def _plot_sla_attainment(self, samples):
         """Plot SLA attainment over time (rolling window)."""
-        times = [s['time'] for s in self.samples]
-        ttft_sla = [s['sla_attainment']['ttft'] for s in self.samples]
-        itl_sla = [s['sla_attainment']['itl'] for s in self.samples]
-        overall_sla = [s['sla_attainment']['overall'] for s in self.samples]
+        times = [s['time'] for s in samples]
+        ttft_sla = [s['sla_attainment']['ttft'] for s in samples]
+        itl_sla = [s['sla_attainment']['itl'] for s in samples]
+        overall_sla = [s['sla_attainment']['overall'] for s in samples]
 
         plt.figure(figsize=(12, 6))
         plt.plot(times, ttft_sla, label='TTFT SLA Attainment', linewidth=2)
@@ -430,17 +446,17 @@ class TimeSeriesMonitor:
         plt.ylabel('SLA Attainment (%)', fontsize=12)
         plt.title(f'SLA Attainment Over Time ({self.sla_window_size}-request rolling window)', fontsize=14)
         plt.ylim(0, 105)
-        plt.legend(fontsize=10)
+        plt.legend(fontsize=10, loc='lower right')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(self.output_dir / 'sla_attainment_over_time.png', dpi=150)
         plt.close()
 
-    def _plot_memory_usage(self):
+    def _plot_memory_usage(self, samples):
         """Plot memory (KV cache) utilization over time."""
         # Group by instance
         instance_ids = set()
-        for sample in self.samples:
+        for sample in samples:
             instance_ids.update(sample['instances'].keys())
 
         plt.figure(figsize=(12, 6))
@@ -449,7 +465,7 @@ class TimeSeriesMonitor:
             times = []
             utilizations = []
 
-            for sample in self.samples:
+            for sample in samples:
                 if instance_id in sample['instances']:
                     inst = sample['instances'][instance_id]
                     times.append(sample['time'])
@@ -469,19 +485,19 @@ class TimeSeriesMonitor:
         plt.ylabel('KV Cache Utilization (%)', fontsize=12)
         plt.title('Memory Usage Over Time', fontsize=14)
         plt.ylim(0, 105)
-        plt.legend(fontsize=9, ncol=2)
+        plt.legend(fontsize=9, ncol=2, loc='upper right')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(self.output_dir / 'memory_usage_over_time.png', dpi=150)
         plt.close()
 
-    def _plot_dropped_requests(self):
+    def _plot_dropped_requests(self, samples):
         """Plot cumulative dropped request count over time."""
-        times = [s['time'] for s in self.samples]
-        num_dropped = [s.get('num_dropped', 0) for s in self.samples]
+        times = [s['time'] for s in samples]
+        num_dropped = [s.get('num_dropped', 0) for s in samples]
 
         # Get breakdown by reason from last sample
-        last_sample = self.samples[-1] if self.samples else {}
+        last_sample = samples[-1] if samples else {}
         breakdown = last_sample.get('dropped_breakdown', {})
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -492,7 +508,7 @@ class TimeSeriesMonitor:
         ax1.set_xlabel('Simulation Time (s)', fontsize=12)
         ax1.set_ylabel('Cumulative Dropped Requests', fontsize=12)
         ax1.set_title('Dropped Requests Over Time', fontsize=14)
-        ax1.legend(fontsize=10)
+        ax1.legend(fontsize=10, loc='upper left')
         ax1.grid(True, alpha=0.3)
 
         # Right plot: pie chart of drop reasons

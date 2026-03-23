@@ -1,66 +1,70 @@
 #!/usr/bin/env python3
-"""Test periodic plot generation with wall-clock timer."""
+"""Test periodic plot generation in multiprocessing environment."""
 
 import time
-from config import SimConfig
-from core.engine import SimulationEngine
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+import sys
 
-# Create minimal config for testing
-config = SimConfig(
-    trace_path="azure_code_500.csv",
-    num_prefill_instances=2,
-    num_decode_instances=2,
-    max_prefill_tokens=8192,
-    enable_monitoring=True,
-    enable_periodic_plots=True,
-    monitoring_plot_interval_minutes=0.25,  # 15 seconds for testing
-    monitoring_sample_interval=1.0,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-print("=" * 80)
-print("Testing Periodic Plot Generation")
-print("=" * 80)
-print(f"Plot interval: {config.monitoring_plot_interval_minutes} minutes")
-print(f"This test will run a short simulation and generate plots every 30 seconds")
-print("Watch the plots/ directory for updated files")
-print("=" * 80)
+from metrics.time_series_monitor import TimeSeriesMonitor
 
-# Create and run engine
-engine = SimulationEngine(config)
 
-print("\nStarting simulation...")
-start_time = time.time()
-
-try:
-    results = engine.run()
-
-    elapsed = time.time() - start_time
-    print(f"\nSimulation completed in {elapsed:.1f} seconds (wall-clock)")
-    print(f"Simulation time: {results.total_simulation_time:.1f}s")
-    print(f"Requests completed: {results.total_requests}")
-    print(f"Average E2E latency: {results.avg_e2e_latency:.2f}s")
-    print(f"Average TTFT: {results.avg_ttft:.2f}s")
-
-    # Check if plots were generated
+def test_periodic_plotting():
+    """Test function that runs in a child process."""
     import os
-    plots_dir = engine.time_series_monitor.output_dir if engine.time_series_monitor else None
-    if plots_dir and os.path.exists(plots_dir):
-        plot_files = [f for f in os.listdir(plots_dir) if f.endswith('.png')]
-        print(f"\nPlot files generated ({len(plot_files)}):")
-        for f in sorted(plot_files):
-            file_path = os.path.join(plots_dir, f)
-            mtime = os.path.getmtime(file_path)
-            print(f"  - {f} (modified: {time.strftime('%H:%M:%S', time.localtime(mtime))})")
+    print(f"\n[TEST] Starting test in PID {os.getpid()}")
 
-    print("\n✓ Test completed successfully!")
+    # Create monitor with short interval for testing (1 minute)
+    monitor = TimeSeriesMonitor(
+        sample_interval=1.0,
+        output_dir="result/test_periodic",
+        run_name="test_run",
+        enable_periodic_plots=True,
+        plot_interval_minutes=1.0,  # 1 minute for testing
+    )
 
-except KeyboardInterrupt:
-    print("\n\nInterrupted by user")
-    if engine.time_series_monitor:
-        engine.time_series_monitor.finalize()
-except Exception as e:
-    print(f"\n✗ Error: {e}")
-    import traceback
-    traceback.print_exc()
-    if engine.time_series_monitor:
-        engine.time_series_monitor.finalize()
+    # Start periodic plotting
+    monitor.start_periodic_plotting()
+
+    # Simulate some work for 3 minutes
+    print(f"[TEST] Simulating work for 3 minutes...")
+    start_time = time.time()
+
+    # Add dummy samples
+    for i in range(180):  # 3 minutes worth of samples
+        sim_time = float(i)
+        engine_state = {
+            'all_instances': [],
+            'metrics_collector': None,
+        }
+        monitor.maybe_sample(sim_time, engine_state)
+        time.sleep(1)  # 1 second between samples
+
+        if i % 30 == 0:
+            print(f"[TEST] Progress: {i}/180 samples collected ({time.time() - start_time:.1f}s elapsed)")
+
+    print(f"[TEST] Finalizing...")
+    monitor.finalize()
+    print(f"[TEST] Test complete!")
+
+    return "success"
+
+
+if __name__ == "__main__":
+    print("="*80)
+    print("Testing periodic plot generation in child process")
+    print("="*80)
+
+    # Test in child process only (faster)
+    print("\n[CHILD] Testing in child process via ProcessPoolExecutor...")
+
+    with ProcessPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(test_periodic_plotting)
+        result = future.result()
+        print(f"[CHILD] Child process test result: {result}")
+
+    print("\n" + "="*80)
+    print("Test complete!")
+    print("="*80)

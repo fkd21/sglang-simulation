@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import timedelta
 
 print("Loading trace file...")
-df = pd.read_csv('AzureLLMInferenceTrace_code_1week.csv')
+df = pd.read_csv('AzureLLMInferenceTrace_code_1week_25pct.csv')
 
 print(f"Total rows: {len(df)}")
 
@@ -24,7 +24,7 @@ df_24h = df[df['TIMESTAMP'] <= end_time_24h].copy()
 print(f"Rows in first 24 hours: {len(df_24h)}")
 
 # Save to new file
-output_file = 'azure_code_24h.csv'
+output_file = 'azure_code_24h_25.csv'
 df_24h.to_csv(output_file, index=False)
 
 print(f"\nSaved {len(df_24h)} rows to {output_file}")
