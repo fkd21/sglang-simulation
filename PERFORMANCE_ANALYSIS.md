@@ -205,12 +205,49 @@ The simulation takes 18+ minutes wall-clock time because:
 - `_decode_allocatable_tokens()`: 35.5s (45.6%)
 - `_try_admit_from_bootstrap()`: 5.7s (7.3%)
 
-### Expected with Phase 4
-- Wall-clock time: **~25-30s** (2.5-3x faster)
-- `_decode_allocatable_tokens()`: **~1s** (95% reduction)
-- Cache overhead: **~0.5s** (hash lookups + invalidations)
+### Phase 4 Attempt Results (FAILED - REVERTED)
 
-### Cumulative Speedup (Phases 2+3+4)
-- **Before**: ~400s (estimated baseline)
-- **After Phase 2+3**: 77.8s (5x faster)
-- **After Phase 2+3+4**: 25-30s (**13-16x faster overall**)
+**Implementation**: Event-level caching of decode instance capacity
+
+**Results** (azure_code_8000.csv):
+- Wall-clock time: **120.4s** (1.55x **SLOWER** than Phase 2+3)
+- `_decode_allocatable_tokens()`: 2.9s (99% call reduction ✅)
+- `_decode_allocatable_tokens_cached()`: 13.6s (78M calls ❌)
+- `_try_admit_from_bootstrap()`: **39.0s** (6.8x slower than baseline!)
+
+**Why Phase 4 Failed**:
+
+1. **Cache check overhead exceeded savings**
+   - Each cached call requires: timestamp check + dict lookup
+   - With 78M cache calls, even O(1) operations add up
+   - Cache check overhead: ~13.6s
+   - Savings from reduced computation: ~32.6s
+   - Net benefit: ~19s, but...
+
+2. **Bootstrap admission became bottleneck**
+   - `_try_admit_from_bootstrap()` went from 5.7s → 39s
+   - Cache invalidation called too frequently
+   - Python dict operations at this scale are expensive
+
+3. **Cache hit rate was TOO HIGH**
+   - 99.82% hit rate means cache checking on every call
+   - Would be better with ~90% hit rate and fewer total calls
+   - The problem isn't cache misses, it's cache existence overhead
+
+**Lessons Learned**:
+
+- **Profiling is essential**: The original analysis was correct about the number of calls, but didn't account for cache overhead
+- **Sometimes simple is better**: Dictionary lookups at 78M scale are not "free"
+- **Cache granularity matters**: Event-level caching may be too frequent
+- **Alternative approach needed**: Rather than caching, need to reduce the number of calls themselves
+
+### Current State: Phase 2 + Phase 3 Only
+
+**Final Performance** (after reverting Phase 4):
+- Wall-clock time: **77.8s** (azure_code_8000.csv)
+- **5x speedup** from baseline (~400s estimated)
+- Remaining bottleneck: `_decode_allocatable_tokens()` at 35.5s
+
+**Cumulative Speedup (Phases 2+3)**:
+- **Before**: ~400s (estimated baseline with no optimizations)
+- **After Phase 2+3**: 77.8s (**5x faster overall**)
