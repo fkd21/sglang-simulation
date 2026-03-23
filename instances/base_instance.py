@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional
+from typing import Deque, List, Optional
 
 from memory.radix_cache import SimRadixCache
 from memory.req_to_token_pool import SimReqToTokenPool
@@ -63,7 +64,7 @@ class SimInstance:
     running_batch: SimBatch = field(default_factory=SimBatch)
 
     # Prefill-specific queues (used when instance_type == PREFILL)
-    bootstrap_queue: List[SimReq] = field(default_factory=list)
+    bootstrap_queue: Deque[SimReq] = field(default_factory=deque)
     inflight_queue: List[SimReq] = field(default_factory=list)
 
     # Decode-specific queues (used when instance_type == DECODE)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import heapq
 import logging
 import random
+from collections import deque
 from pathlib import Path
 from typing import List, Tuple
 
@@ -630,11 +631,12 @@ class SimulationEngine:
             return []
 
         admitted_any = False
-        requests_to_requeue = []  # Requests that don't fit now, retry later
+        requests_to_requeue = deque()  # Requests that don't fit now, retry later
 
         # Process all requests in current bootstrap queue
-        for req in list(prefill_instance.bootstrap_queue):
-            prefill_instance.bootstrap_queue.remove(req)
+        # Using deque for O(1) popleft() instead of O(n) list.remove()
+        while prefill_instance.bootstrap_queue:
+            req = prefill_instance.bootstrap_queue.popleft()
 
             # Select decode instance (least-loaded by allocatable tokens)
             if req.assigned_decode_instance is not None:
@@ -686,7 +688,7 @@ class SimulationEngine:
                 requests_to_requeue.append(req)
 
         # Requeue skipped requests to END of queue (fairness)
-        prefill_instance.bootstrap_queue.extend(requests_to_requeue)
+        prefill_instance.bootstrap_queue = requests_to_requeue
 
         # If we admitted anything, try to schedule prefill
         if admitted_any:
@@ -706,7 +708,11 @@ class SimulationEngine:
         if timeout_seconds <= 0:
             return  # Timeout disabled
 
-        for req in list(prefill_instance.bootstrap_queue):
+        # Rebuild queue excluding timed-out requests (O(n) instead of O(n²))
+        temp_queue = deque()
+        while prefill_instance.bootstrap_queue:
+            req = prefill_instance.bootstrap_queue.popleft()
+
             # Lazy init: track first time in bootstrap queue
             if not hasattr(req, '_bootstrap_entry_time'):
                 req._bootstrap_entry_time = self.current_time
@@ -714,8 +720,12 @@ class SimulationEngine:
             elapsed = self.current_time - req._bootstrap_entry_time
             if elapsed > timeout_seconds:
                 # Timeout exceeded - abort request silently
-                prefill_instance.bootstrap_queue.remove(req)
                 self.metrics_collector.record_dropped_request(req, "bootstrap_timeout")
+            else:
+                # Keep in queue
+                temp_queue.append(req)
+
+        prefill_instance.bootstrap_queue = temp_queue
 
     # ---- REQUEST ARRIVAL ----
 
@@ -1228,15 +1238,19 @@ class SimulationEngine:
 
         # Try to process any prealloc queue requests that were deferred
         # Skip during drain to avoid adding new work
+        # Use index-based removal to avoid O(n²) list.remove()
         if instance.prealloc_queue and not instance.draining:
-            for req in instance.prealloc_queue[:]:
+            i = 0
+            while i < len(instance.prealloc_queue):
+                req = instance.prealloc_queue[i]
                 total_tokens = req.context_tokens + len(req.output_ids)
                 req.extend_input_len = total_tokens
                 if instance.allocate_memory(req):
-                    instance.prealloc_queue.remove(req)
+                    del instance.prealloc_queue[i]
                     instance.waiting_queue.append(req)
                     req.stage = RequestStage.DECODE_WAITING
                     req.decode_queue_entry_time = self.current_time
+                    # Don't increment i - next element shifts down
                 else:
                     break  # Still no memory
 
@@ -1288,16 +1302,20 @@ class SimulationEngine:
         events = []
 
         # Re-try decode scheduling (prealloc_queue may have deferred requests)
+        # Use index-based removal to avoid O(n²) list.remove()
         if decode_instance and not decode_instance.busy:
             if decode_instance.prealloc_queue:
-                for prealloc_req in decode_instance.prealloc_queue[:]:
+                i = 0
+                while i < len(decode_instance.prealloc_queue):
+                    prealloc_req = decode_instance.prealloc_queue[i]
                     total_tokens = prealloc_req.context_tokens + len(prealloc_req.output_ids)
                     prealloc_req.extend_input_len = total_tokens
                     if decode_instance.allocate_memory(prealloc_req):
-                        decode_instance.prealloc_queue.remove(prealloc_req)
+                        del decode_instance.prealloc_queue[i]
                         decode_instance.waiting_queue.append(prealloc_req)
                         prealloc_req.stage = RequestStage.DECODE_WAITING
                         prealloc_req.decode_queue_entry_time = self.current_time
+                        # Don't increment i
                     else:
                         break
             events.extend(self._try_schedule_decode(decode_instance))
@@ -1726,7 +1744,7 @@ class SimulationEngine:
             return 0
 
         # Take all requests from source at once
-        requests = source.bootstrap_queue[:]
+        requests = list(source.bootstrap_queue)
         source.bootstrap_queue.clear()
 
         migrated_count = 0
@@ -1746,8 +1764,8 @@ class SimulationEngine:
             req.migration_timestamp = self.current_time
             req.assigned_prefill_instance = target.instance_id
 
-            # Insert at head for priority
-            target.bootstrap_queue.insert(0, req)
+            # Insert at head for priority (using appendleft for O(1) with deque)
+            target.bootstrap_queue.appendleft(req)
             migrated_count += 1
 
         # Handle failed migrations - drop with clear reason
@@ -2172,7 +2190,7 @@ class SimulationEngine:
 
                     if other_prefills:
                         target = min(other_prefills, key=lambda p: len(p.bootstrap_queue))
-                        target.bootstrap_queue.insert(0, req)
+                        target.bootstrap_queue.appendleft(req)
                         print(f"    Recovered req {req.rid} → {target.instance_id} bootstrap_queue")
                     else:
                         print(f"    ERROR: No prefill targets - dropping req {req.rid}")

@@ -138,6 +138,7 @@ class WorkloadDriver:
         else:
             self.loader = TraceLoader(trace_path)
         self.requests = []
+        self.total_requests_loaded = 0  # Track total requests for consistency with StreamingLoader
 
     def load_trace(self) -> List[SimReq]:
         """Load trace requests.
@@ -146,6 +147,7 @@ class WorkloadDriver:
             List of SimReq objects
         """
         self.requests = self.loader.load()
+        self.total_requests_loaded = len(self.requests)  # Update counter
         return self.requests
 
     def get_requests(self) -> List[SimReq]:

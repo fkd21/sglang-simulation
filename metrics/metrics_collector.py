@@ -165,6 +165,7 @@ class MetricsCollector:
 
         # Dropped requests tracking (SGLang-style)
         self.dropped_requests: List[Dict] = []
+        self.dropped_breakdown_cache: Dict[str, int] = {}  # Incremental cache for O(1) breakdown
 
     def record_arrival(self, req: SimReq, timestamp: float):
         """Record request arrival.
@@ -242,6 +243,8 @@ class MetricsCollector:
             'context_tokens': req.context_tokens,
             'generated_tokens': req.generated_tokens,
         })
+        # Update incremental cache for O(1) breakdown retrieval
+        self.dropped_breakdown_cache[reason] = self.dropped_breakdown_cache.get(reason, 0) + 1
 
     def _update_streaming_stats(self, e2e_latency: float, ttft: float, itl: float,
                                 ttft_sla_met: bool, itl_sla_met: bool):

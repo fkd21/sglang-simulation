@@ -64,6 +64,11 @@ class TimeSeriesMonitor:
         # Track recent completions for SLA rolling window
         self.recent_completions: deque = deque(maxlen=sla_window_size)
 
+        # Incremental SLA counters for O(1) calculation (avoids re-scanning deque)
+        self.recent_ttft_met_count: int = 0
+        self.recent_itl_met_count: int = 0
+        self.recent_both_met_count: int = 0
+
         # Throughput tracking (for interval calculation)
         self.interval_prefill_tokens = 0
         self.interval_decode_tokens = 0
@@ -147,13 +152,37 @@ class TimeSeriesMonitor:
         if req.decode_tokens_generated > 0 and req.decode_end_time > req.decode_start_time:
             itl = (req.decode_end_time - req.decode_start_time) / req.decode_tokens_generated
 
-        self.recent_completions.append({
+        completion_record = {
             'timestamp': timestamp,
             'ttft': ttft,
             'itl': itl,
             'ttft_sla_met': ttft <= self.ttft_sla if ttft > 0 else False,
             'itl_sla_met': itl <= self.itl_sla if itl > 0 else False,
-        })
+        }
+
+        # Track evicted record if deque is full (for incremental counter updates)
+        evicted_record = None
+        if len(self.recent_completions) == self.sla_window_size:
+            evicted_record = self.recent_completions[0]
+
+        self.recent_completions.append(completion_record)
+
+        # Update incremental SLA counters for O(1) calculation
+        if completion_record['ttft_sla_met']:
+            self.recent_ttft_met_count += 1
+        if completion_record['itl_sla_met']:
+            self.recent_itl_met_count += 1
+        if completion_record['ttft_sla_met'] and completion_record['itl_sla_met']:
+            self.recent_both_met_count += 1
+
+        # Decrement counters for evicted record (if deque was full)
+        if evicted_record:
+            if evicted_record['ttft_sla_met']:
+                self.recent_ttft_met_count -= 1
+            if evicted_record['itl_sla_met']:
+                self.recent_itl_met_count -= 1
+            if evicted_record['ttft_sla_met'] and evicted_record['itl_sla_met']:
+                self.recent_both_met_count -= 1
 
     def _collect_sample(
         self, current_time: float, engine_state: Dict[str, Any]
@@ -176,13 +205,10 @@ class TimeSeriesMonitor:
         sla_metrics = self._calculate_sla_metrics()
 
         # Get dropped request count from metrics collector
+        # Use cached breakdown for O(1) instead of O(n) iteration
         metrics_collector = engine_state.get('metrics_collector')
         num_dropped = len(metrics_collector.dropped_requests) if metrics_collector else 0
-        dropped_breakdown = {}
-        if metrics_collector:
-            for drop_record in metrics_collector.dropped_requests:
-                reason = drop_record.get('reason', 'unknown')
-                dropped_breakdown[reason] = dropped_breakdown.get(reason, 0) + 1
+        dropped_breakdown = dict(metrics_collector.dropped_breakdown_cache) if metrics_collector else {}
 
         # Collect queue metrics for each instance
         instance_metrics = {}
@@ -213,15 +239,18 @@ class TimeSeriesMonitor:
     def _calculate_sla_metrics(self) -> Dict[str, float]:
         """Calculate SLA metrics from rolling window.
 
+        Uses cached counters for O(1) calculation instead of O(n) iteration.
+
         Returns:
             Dictionary with SLA attainment rates
         """
         if not self.recent_completions:
             return {'ttft': 0.0, 'itl': 0.0, 'overall': 0.0}
 
-        ttft_met = sum(1 for c in self.recent_completions if c['ttft_sla_met'])
-        itl_met = sum(1 for c in self.recent_completions if c['itl_sla_met'])
-        both_met = sum(1 for c in self.recent_completions if c['ttft_sla_met'] and c['itl_sla_met'])
+        # Use cached counters for O(1) instead of O(n) iteration
+        ttft_met = self.recent_ttft_met_count
+        itl_met = self.recent_itl_met_count
+        both_met = self.recent_both_met_count
 
         total = len(self.recent_completions)
         return {
