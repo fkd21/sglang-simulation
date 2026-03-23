@@ -166,7 +166,7 @@ def experiment_switching_offload_4p4d(max_workers: Optional[int] = None) -> List
             streaming_lookback=60.0,       # 1 minute safety buffer
             # Enable monitoring and periodic plots
             enable_monitoring=True,
-            monitoring_plot_interval_minutes=15.0,
+            monitoring_plot_interval_minutes=60.0,
         )
         tasks.append((
             config,
@@ -192,7 +192,7 @@ def experiment_switching_offload_4p4d(max_workers: Optional[int] = None) -> List
             streaming_lookback=60.0,       # 1 minute safety buffer
             # Enable monitoring and periodic plots
             enable_monitoring=True,
-            monitoring_plot_interval_minutes=15.0,
+            monitoring_plot_interval_minutes=60.0,
         )
         tasks.append((
             config,
@@ -219,7 +219,7 @@ def experiment_switching_offload_4p4d(max_workers: Optional[int] = None) -> List
             streaming_lookback=60.0,       # 1 minute safety buffer
             # Enable monitoring and periodic plots
             enable_monitoring=True,
-            monitoring_plot_interval_minutes=15.0,
+            monitoring_plot_interval_minutes=60.0,
         )
         tasks.append((
             config,

@@ -105,7 +105,7 @@ def calculate_decode_offload_budget(
 
     # Step 6: Calculate total budget across all decode instances
     # Budget scales with number of decode instances (total capacity)
-    budget = per_iter_budget * n_iter * num_decode_instances
+    budget = per_iter_budget * n_iter * (num_decode_instances/num_prefill_instances)*2
 
     return max(0.0, budget)
 
