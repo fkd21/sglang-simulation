@@ -582,9 +582,23 @@ class SimulationEngine:
         """
         available = decode_instance.token_to_kv_pool.available_size()
 
-        # Subtract virtual reservations (KV tokens for prealloc_reserved requests)
-        for req in decode_instance.prealloc_reserved:
-            available -= req.context_tokens + len(req.output_ids)
+        # Phase 4v2: O(1) instead of O(n) loop over prealloc_reserved
+        # Subtract virtual reservations using running sum counter
+        available -= decode_instance._prealloc_reserved_tokens
+
+        # Phase 4v2: Correctness check (disabled for production - enable only for debugging)
+        # if __debug__:
+        #     computed_sum = sum(
+        #         req.context_tokens + len(req.output_ids)
+        #         for req in decode_instance.prealloc_reserved
+        #     )
+        #     if decode_instance._prealloc_reserved_tokens != computed_sum:
+        #         raise AssertionError(
+        #             f"Phase 4v2 counter drift on {decode_instance.instance_id}: "
+        #             f"counter={decode_instance._prealloc_reserved_tokens}, "
+        #             f"actual={computed_sum}, "
+        #             f"prealloc_reserved size={len(decode_instance.prealloc_reserved)}"
+        #         )
 
         # Count ONLY active in-flight requests (SGLang pattern)
         # Don't count waiting/prealloc - they're already blocked waiting for memory
@@ -678,6 +692,8 @@ class SimulationEngine:
             if tokens_needed <= allocatable:
                 # Admit: move to waiting queue, add virtual reservation
                 decode_instance.prealloc_reserved.append(req)
+                # Phase 4v2: Increment running sum counter
+                decode_instance._prealloc_reserved_tokens += req.context_tokens + len(req.output_ids)
                 req.assigned_decode_instance = decode_instance.instance_id
                 prefill_instance.add_request(req)  # adds to waiting_queue
                 req.bootstrap_exit_time = self.current_time
@@ -1102,6 +1118,8 @@ class SimulationEngine:
             # Release virtual reservation from old instance if still present
             if req in decode_instance.prealloc_reserved:
                 decode_instance.prealloc_reserved.remove(req)
+                # Phase 4v2: Decrement running sum counter
+                decode_instance._prealloc_reserved_tokens -= req.context_tokens + len(req.output_ids)
             return self._admit_to_decode(req, new_decode)
 
         return self._admit_to_decode(req, decode_instance)
@@ -1117,6 +1135,8 @@ class SimulationEngine:
         # Release virtual reservation (request has arrived physically)
         if req in decode_instance.prealloc_reserved:
             decode_instance.prealloc_reserved.remove(req)
+            # Phase 4v2: Decrement running sum counter
+            decode_instance._prealloc_reserved_tokens -= req.context_tokens + len(req.output_ids)
 
         total_tokens = req.context_tokens + len(req.output_ids)
         req.extend_input_len = total_tokens
@@ -1844,6 +1864,8 @@ class SimulationEngine:
 
         requests = source.prealloc_reserved[:]
         source.prealloc_reserved.clear()
+        # Phase 4v2: Clear counter when clearing list
+        source._prealloc_reserved_tokens = 0
 
         count = 0
         unmigrated = []
@@ -1860,9 +1882,14 @@ class SimulationEngine:
             req.assigned_decode_instance = target.instance_id
 
             target.prealloc_reserved.insert(0, req)
+            # Phase 4v2: Increment target counter
+            target._prealloc_reserved_tokens += req.context_tokens + len(req.output_ids)
             count += 1
 
+        # Phase 4v2: Restore counter for unmigrated requests
         source.prealloc_reserved.extend(unmigrated)
+        for req in unmigrated:
+            source._prealloc_reserved_tokens += req.context_tokens + len(req.output_ids)
         return count
 
     def _migrate_decode_prealloc_queue(self, source: DecodeInstance) -> int:
@@ -2092,6 +2119,8 @@ class SimulationEngine:
             # Don't clear transfer_queue: in-flight KV transfers will complete
             # and be re-routed in _handle_kv_transfer_complete
             instance.prealloc_reserved.clear()
+            # Phase 4v2: Reset counter when clearing list
+            instance._prealloc_reserved_tokens = 0
 
         # Move instance between instance manager lists
         if old_role == InstanceType.PREFILL and new_role == InstanceType.DECODE:
@@ -2125,6 +2154,8 @@ class SimulationEngine:
                 instance.waiting_queue.clear()
                 instance.prealloc_queue.clear()
                 instance.prealloc_reserved.clear()
+                # Phase 4v2: Reset counter when clearing list
+                instance._prealloc_reserved_tokens = 0
 
                 # Try to re-route each orphaned request
                 for req in orphaned_requests:
