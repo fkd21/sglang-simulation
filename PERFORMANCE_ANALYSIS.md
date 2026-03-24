@@ -241,13 +241,21 @@ The simulation takes 18+ minutes wall-clock time because:
 - **Cache granularity matters**: Event-level caching may be too frequent
 - **Alternative approach needed**: Rather than caching, need to reduce the number of calls themselves
 
-### Current State: Phase 2 + Phase 3 Only
+### Current State: Phase 2 + Phase 3 + Phase 4v2 (COMPLETE)
 
-**Final Performance** (after reverting Phase 4):
-- Wall-clock time: **77.8s** (azure_code_8000.csv)
-- **5x speedup** from baseline (~400s estimated)
-- Remaining bottleneck: `_decode_allocatable_tokens()` at 35.5s
+**Phase 4v2 Results** (Incremental Capacity Tracking - SUCCESSFUL):
+- Wall-clock time: **15.0s** (azure_code_8000.csv, integration test)
+- Profiling time: **43.1s** (with profiling overhead)
+- `_decode_allocatable_tokens()`: 98.1s → 13.9s (7x faster)
+- `_try_admit_from_bootstrap()`: 117.0s → 28.2s (4x faster)
 
-**Cumulative Speedup (Phases 2+3)**:
-- **Before**: ~400s (estimated baseline with no optimizations)
-- **After Phase 2+3**: 77.8s (**5x faster overall**)
+**Implementation**:
+- Added `_prealloc_reserved_tokens` running sum counter to SimInstance base class
+- Replaced O(n) loop (150 iterations × 11M calls) with O(1) subtraction
+- Updated all 8 prealloc_reserved modification points to maintain counter
+- Counter tracked in base class to support role switching
+
+**Cumulative Speedup (Phases 2+3+4v2)**:
+- **Baseline**: ~400s (estimated with no optimizations)
+- **After Phase 2+3**: 77.8s (5.1x faster)
+- **After Phase 4v2**: 15.0s (**26.7x faster overall**)
