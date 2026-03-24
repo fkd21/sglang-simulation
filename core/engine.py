@@ -84,6 +84,7 @@ class SimulationEngine:
             # Alpha params
             alpha_threshold=config.alpha_threshold,
             alpha_threshold_down=config.alpha_threshold_down,
+            alpha_allow_decode_to_prefill=config.alpha_allow_decode_to_prefill,
             # V1 params
             prefill_high=config.prefill_pressure_high,
             prefill_low=config.prefill_pressure_low,
@@ -1673,6 +1674,9 @@ class SimulationEngine:
         instance.switch_target_role = target_role
         instance.switch_initiated_time = self.current_time
         instance.accepting_requests = False
+        # CRITICAL FIX: Reset blocked_until to allow drain completion check
+        # Without this, second+ switches fail because blocked_until retains old value
+        instance.blocked_until = 0.0
 
         events = []
 

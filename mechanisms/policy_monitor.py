@@ -32,6 +32,7 @@ class PolicyMonitor:
         # Alpha policy params
         alpha_threshold: float = 1.0,
         alpha_threshold_down: float = 0.5,
+        alpha_allow_decode_to_prefill: bool = True,
         # V1 policy params
         prefill_high: float = 10.0,
         prefill_low: float = 2.0,
@@ -81,6 +82,7 @@ class PolicyMonitor:
             args = argparse.Namespace(
                 alpha_threshold=alpha_threshold,
                 alpha_threshold_down=alpha_threshold_down,
+                alpha_allow_decode_to_prefill=alpha_allow_decode_to_prefill,
                 stable_evals=stable_evals,
                 global_cooldown_s=global_cooldown_s,
                 per_worker_cooldown_s=per_worker_cooldown_s,

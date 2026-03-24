@@ -56,6 +56,7 @@ class SimConfig:
     # Alpha policy parameters
     alpha_threshold: float = 1.0
     alpha_threshold_down: float = 0.5
+    alpha_allow_decode_to_prefill: bool = True  # Allow decode→prefill switching in alpha policy
 
     # V1 policy parameters
     prefill_pressure_high: float = 10.0

@@ -120,9 +120,10 @@ class PolicyAlphaSim(object):
 
         stable_evals = int(self.args.stable_evals)
         idle_k = int(self.args.idle_scrapes)
+        allow_decode_to_prefill = getattr(self.args, "alpha_allow_decode_to_prefill", True)
 
         # Decode→Prefill transition (alpha high)
-        if self._stable_dp >= stable_evals:
+        if allow_decode_to_prefill and self._stable_dp >= stable_evals:
             if len(decode) <= int(self.args.min_decode):
                 action = {"kind": "noop", "reason": "min_decode_guard"}
                 return {"policy": "alpha", "context": context, "action": action}
