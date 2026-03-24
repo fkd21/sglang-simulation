@@ -96,6 +96,10 @@ class SimInstance:
     blocked_until: float = 0.0
     accepting_requests: bool = True
 
+    # Phase 4v2: Running sum counter (used only for decode instances)
+    # Tracked in base class to support role switching
+    _prealloc_reserved_tokens: int = 0
+
     def is_idle(self) -> bool:
         """Check if instance is idle.
 

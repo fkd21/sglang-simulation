@@ -23,7 +23,4 @@ class DecodeInstance(SimInstance):
             instance_id: Instance identifier
         """
         super().__init__(instance_id=instance_id, instance_type=InstanceType.DECODE)
-
-        # Phase 4v2: Running sum of tokens in prealloc_reserved for O(1) capacity calculation
-        # Eliminates O(n) loop over prealloc_reserved list (n ~150 items, called 11M times)
-        self._prealloc_reserved_tokens = 0
+        # Note: _prealloc_reserved_tokens counter is inherited from SimInstance base class
