@@ -43,6 +43,7 @@ class SimConfig:
     tpot_sla: float = 0.1  # 100ms TPOT threshold (10 tokens/sec)
     itl_sla: float = 0.1  # 100ms ITL SLA threshold
     enable_decode_protection: bool = True  # Enable decode TPOT constraint
+    budget_scaling_factor: float = 1.0  # Scaling factor for decode offload budget (1.0 = baseline, 2.0 = double budget)
 
     enable_continuation: bool = False
     enable_switching: bool = False
@@ -57,6 +58,12 @@ class SimConfig:
     alpha_threshold: float = 1.0
     alpha_threshold_down: float = 0.5
     alpha_allow_decode_to_prefill: bool = True  # Allow decode→prefill switching in alpha policy
+    alpha_allow_prefill_to_decode: bool = True  # Allow prefill→decode switching in alpha policy
+
+    # Alpha V2 policy parameters (with decode pressure guard)
+    alpha_v2_threshold: float = 1.0
+    alpha_v2_allow_decode_to_prefill: bool = True
+    alpha_v2_allow_prefill_to_decode: bool = True
 
     # V1 policy parameters
     prefill_pressure_high: float = 10.0

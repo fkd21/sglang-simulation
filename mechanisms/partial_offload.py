@@ -58,7 +58,8 @@ def calculate_decode_offload_budget(
     tpot_sla: float,
     prefill_max_tokens: int,
     num_decode_instances: int,
-    num_prefill_instances: int
+    num_prefill_instances: int,
+    budget_scaling_factor: float = 1.0
 ) -> float:
     """Calculate maximum offload tokens respecting TPOT constraint.
 
@@ -72,6 +73,7 @@ def calculate_decode_offload_budget(
         prefill_max_tokens: Maximum tokens per prefill batch (for time estimation)
         num_decode_instances: Total number of decode instances in system
         num_prefill_instances: Total number of prefill instances in system
+        budget_scaling_factor: Scaling factor for budget calculation (default 1.0)
 
     Returns:
         Maximum offload tokens allowed (can be 0.0)
@@ -105,7 +107,8 @@ def calculate_decode_offload_budget(
 
     # Step 6: Calculate total budget across all decode instances
     # Budget scales with number of decode instances (total capacity)
-    budget = per_iter_budget * n_iter * (num_decode_instances/num_prefill_instances)*2
+    budget = per_iter_budget * n_iter * (num_decode_instances/num_prefill_instances)*budget_scaling_factor
+    
 
     return max(0.0, budget)
 

@@ -1,4 +1,7 @@
-"""Run Alpha-Only Experiment: Alpha + Alpha with Offload (only decode→prefill switching allowed)"""
+"""Run Alpha V2-Only Experiment: Alpha V2 + Alpha V2 with Offload (only decode→prefill switching allowed)
+
+Alpha V2 uses decode pressure guard for more conservative role switching.
+"""
 
 from __future__ import annotations
 
@@ -31,8 +34,8 @@ def _run_one(args: Tuple) -> Dict[str, Any]:
     print(f"  - Policy: {extras.get('policy', 'N/A')}", flush=True)
     print(f"  - Offload mode: {extras.get('offload_mode', 'N/A')}", flush=True)
     print(f"  - Switching: {config.enable_switching}, Protection: {config.enable_decode_protection}", flush=True)
-    print(f"  - Alpha decode→prefill: {config.alpha_allow_decode_to_prefill}", flush=True)
-    print(f"  - Alpha prefill→decode: {config.alpha_allow_prefill_to_decode}", flush=True)
+    print(f"  - Alpha V2 decode→prefill: {config.alpha_v2_allow_decode_to_prefill}", flush=True)
+    print(f"  - Alpha V2 prefill→decode: {config.alpha_v2_allow_prefill_to_decode}", flush=True)
 
     engine = SimulationEngine(config)
     print(f"[SIMULATING] {label} - engine created, starting simulation...", flush=True)
@@ -53,8 +56,8 @@ def _run_one(args: Tuple) -> Dict[str, Any]:
         "max_prefill_tokens": config.max_prefill_tokens,
         "enable_switching": config.enable_switching,
         "switch_policy": config.switch_policy,
-        "alpha_allow_decode_to_prefill": config.alpha_allow_decode_to_prefill,
-        "alpha_allow_prefill_to_decode": config.alpha_allow_prefill_to_decode,
+        "alpha_v2_allow_decode_to_prefill": config.alpha_v2_allow_decode_to_prefill,
+        "alpha_v2_allow_prefill_to_decode": config.alpha_v2_allow_prefill_to_decode,
     }
     d.update(extras)
     return d
@@ -129,16 +132,18 @@ def _ensure_azure_1h() -> Path:
     )
 
 
-def experiment_alpha_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
-    """Test alpha policy only x 3 offload modes at 4p4d with 1h Azure code requests.
+def experiment_alpha_v2_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
+    """Test alpha_v2 policy only x 3 offload modes at 4p4d with 1h Azure code requests.
 
     Key difference: Only decode→prefill switching is allowed, prefill→decode is disabled.
-    - alpha_allow_decode_to_prefill = True (allow decode → prefill)
-    - alpha_allow_prefill_to_decode = False (disable prefill → decode)
+    - alpha_v2_allow_decode_to_prefill = True (allow decode → prefill)
+    - alpha_v2_allow_prefill_to_decode = False (disable prefill → decode)
+
+    Alpha V2 uses decode pressure guard for more conservative switching compared to Alpha.
 
     Policies tested:
-    - alpha: Alpha policy with no offload
-    - alpha_offload: Alpha policy with offload configurations
+    - alpha_v2: Alpha V2 policy with no offload
+    - alpha_v2_offload: Alpha V2 policy with offload configurations
 
     Offload modes:
     - no_offload: baseline without offload
@@ -146,20 +151,21 @@ def experiment_alpha_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
     - offload_with_protection: offload enabled, with decode TPOT protection
     """
     print("\n" + "="*80)
-    print("=== Alpha-Only Experiment (1h trace): Alpha + Alpha with Offload (3 configurations) ===")
+    print("=== Alpha V2-Only Experiment (1h trace): Alpha V2 + Alpha V2 with Offload (3 configurations) ===")
     print("=== CRITICAL: Only decode→prefill switching allowed (prefill→decode disabled) ===")
+    print("=== Alpha V2 uses decode pressure guard for conservative switching ===")
     print("="*80 + "\n")
     trace = str(_ensure_azure_1h())
 
-    # Only test alpha policy (no other policies)
+    # Only test alpha_v2 policy (no other policies)
     policies = [
-        ("alpha", True, "alpha"),
+        ("alpha_v2", True, "alpha_v2"),
     ]
-    print(f"[CONFIG] Testing alpha policy only")
+    print(f"[CONFIG] Testing alpha_v2 policy only")
     print(f"[CONFIG] Each configuration will be tested with 3 offload modes")
     print(f"[CONFIG] Total configurations: {len(policies) * 3} = 3\n")
-    print(f"[CONFIG] IMPORTANT: alpha_allow_decode_to_prefill=True in ALL configs")
-    print(f"[CONFIG]            alpha_allow_prefill_to_decode=False in ALL configs")
+    print(f"[CONFIG] IMPORTANT: alpha_v2_allow_decode_to_prefill=True in ALL configs")
+    print(f"[CONFIG]            alpha_v2_allow_prefill_to_decode=False in ALL configs")
     print(f"[CONFIG]            This means ONLY decode→prefill switching is allowed\n")
 
     tasks = []
@@ -173,8 +179,8 @@ def experiment_alpha_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
             num_decode_instances=4,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
-            alpha_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
-            alpha_allow_prefill_to_decode=False,  # CRITICAL: Disable prefill→decode
+            alpha_v2_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
+            alpha_v2_allow_prefill_to_decode=False,  # CRITICAL: Disable prefill→decode
             enable_dynamic_lp=False,
             # Enable streaming loading to avoid OOM
             enable_streaming_loading=True,
@@ -198,8 +204,8 @@ def experiment_alpha_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
             num_decode_instances=4,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
-            alpha_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
-            alpha_allow_prefill_to_decode=False,  # CRITICAL: Disable prefill→decode
+            alpha_v2_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
+            alpha_v2_allow_prefill_to_decode=False,  # CRITICAL: Disable prefill→decode
             enable_dynamic_lp=True,
             enable_decode_protection=False,  # Disable decode protection
             slo_target=1.0,
@@ -226,8 +232,8 @@ def experiment_alpha_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
             num_decode_instances=4,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
-            alpha_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
-            alpha_allow_prefill_to_decode=False,  # CRITICAL: Disable prefill→decode
+            alpha_v2_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
+            alpha_v2_allow_prefill_to_decode=False,  # CRITICAL: Disable prefill→decode
             enable_dynamic_lp=True,
             enable_decode_protection=True,  # Enable decode protection
             tpot_sla=0.1,  # 100ms TPOT threshold
@@ -259,7 +265,7 @@ def experiment_alpha_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
 def main():
     import sys
     print("\n" + "="*80)
-    print("ALPHA-ONLY EXPERIMENT (1H TRACE): ALPHA POLICY WITH ONLY DECODE→PREFILL")
+    print("ALPHA V2-ONLY EXPERIMENT (1H TRACE): ALPHA V2 POLICY WITH ONLY DECODE→PREFILL")
     print("="*80)
     print(f"[INIT] Results will be saved to {RESULTS_DIR}")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -272,9 +278,9 @@ def main():
         print("!!! TEST MODE: Using 1 worker !!!")
         print("!"*80 + "\n")
 
-    print(f"[INIT] Starting alpha-only experiment (1h trace)...")
-    results = experiment_alpha_only_4p4d(max_workers=workers)
-    save_experiment("alpha_only_4p4d", results)
+    print(f"[INIT] Starting alpha_v2-only experiment (1h trace)...")
+    results = experiment_alpha_v2_only_4p4d(max_workers=workers)
+    save_experiment("alpha_v2_only_4p4d", results)
 
     print("\n" + "="*80)
     print("✓ EXPERIMENT COMPLETE!")

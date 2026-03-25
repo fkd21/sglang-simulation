@@ -19,6 +19,7 @@ from metrics.metrics_collector import MetricsCollector, SimulationResults
 from metrics.time_series_monitor import TimeSeriesMonitor
 from policy.policy_controller import PolicyController
 from mechanisms.policy_monitor import PolicyMonitor
+from mechanisms.partial_offload import calculate_decode_offload_budget
 from request.batch import ForwardMode, SimBatch
 from request.request import RequestStage, SimReq
 from results.iteration_logger import IterationLogger
@@ -85,6 +86,11 @@ class SimulationEngine:
             alpha_threshold=config.alpha_threshold,
             alpha_threshold_down=config.alpha_threshold_down,
             alpha_allow_decode_to_prefill=config.alpha_allow_decode_to_prefill,
+            alpha_allow_prefill_to_decode=config.alpha_allow_prefill_to_decode,
+            # Alpha V2 params
+            alpha_v2_threshold=config.alpha_v2_threshold,
+            alpha_v2_allow_decode_to_prefill=config.alpha_v2_allow_decode_to_prefill,
+            alpha_v2_allow_prefill_to_decode=config.alpha_v2_allow_prefill_to_decode,
             # V1 params
             prefill_high=config.prefill_pressure_high,
             prefill_low=config.prefill_pressure_low,
@@ -1478,9 +1484,28 @@ class SimulationEngine:
                 decode_bs = 0
                 decode_token_sum = 0
 
-            betas, feasible, solve_time = self.policy.solve_dynamic_betas(
-                eligible_requests, self.current_time, decode_bs, decode_token_sum
-            )
+            # Check if decode protection is enabled
+            if self.config.enable_decode_protection:
+                # Calculate budget based on current decode state
+                decode_budget = calculate_decode_offload_budget(
+                    decode_bs=decode_bs,
+                    decode_token_sum=decode_token_sum,
+                    tpot_sla=self.config.tpot_sla,
+                    prefill_max_tokens=self.config.max_prefill_tokens,
+                    num_decode_instances=len(self.instance_manager.decode_instances),
+                    num_prefill_instances=len(self.instance_manager.prefill_instances),
+                    budget_scaling_factor=self.config.budget_scaling_factor
+                )
+
+                # Solve with budget constraint
+                betas, feasible, solve_time = self.policy.solve_dynamic_betas_with_budget(
+                    eligible_requests, self.current_time, decode_bs, decode_token_sum, decode_budget
+                )
+            else:
+                # No protection: solve without budget constraint
+                betas, feasible, solve_time = self.policy.solve_dynamic_betas(
+                    eligible_requests, self.current_time, decode_bs, decode_token_sum
+                )
 
             # Apply betas to eligible requests
             for req, beta in zip(eligible_requests, betas):

@@ -1,12 +1,20 @@
+"""Policy Alpha V2 (Simulation Version with Decode Pressure Guard).
+
+Alpha-based role switching policy for simulation with decode pressure guard.
+This is adapted from policy_alpha.py (monitoring version) with:
+1. Local imports (worker_state module instead of monitor.*)
+2. Decode pressure guard for more conservative switching
+3. Mutually exclusive stability counters
+"""
+
 import argparse
 from typing import Any, Dict, List
 
-from monitor.metrics import _get_metric, _idle_for_k_scrapes
-from monitor.state import WorkerState
+from mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
 
 
-class PolicyAlpha(object):
-    """Policy alpha: alpha-led switching with decode-pressure guard.
+class PolicyAlphaSimV2(object):
+    """Policy alpha v2: alpha-led switching with decode-pressure guard.
 
     Direction:
       - if max_prefill_alpha > alpha_threshold AND decode_pressure < decode_low
@@ -115,7 +123,7 @@ class PolicyAlpha(object):
 
         if self._last_proposal_unix and (now_unix - self._last_proposal_unix) < float(self.args.global_cooldown_s):
             action = {"kind": "noop", "reason": "global_cooldown"}
-            return {"policy": "alpha", "context": context, "action": action}
+            return {"policy": "alpha_v2", "context": context, "action": action}
 
         stable_evals = int(self.args.stable_evals)
         idle_k = int(self.args.idle_scrapes)
@@ -123,12 +131,12 @@ class PolicyAlpha(object):
         if self._stable_dp >= stable_evals:
             if len(decode) <= int(self.args.min_decode):
                 action = {"kind": "noop", "reason": "min_decode_guard"}
-                return {"policy": "alpha", "context": context, "action": action}
+                return {"policy": "alpha_v2", "context": context, "action": action}
 
             candidates = [w for w in decode if not self._in_cooldown(now_unix, w.port)]
             if not candidates:
                 action = {"kind": "noop", "reason": "no_decode_candidate"}
-                return {"policy": "alpha", "context": context, "action": action}
+                return {"policy": "alpha_v2", "context": context, "action": action}
 
             def score_decode(w: WorkerState) -> float:
                 transfer = _get_metric(w.last_parsed, "num_decode_transfer_queue_reqs") or 0.0
@@ -158,17 +166,17 @@ class PolicyAlpha(object):
                     "num_running_reqs": _get_metric(chosen.last_parsed, "num_running_reqs"),
                 },
             }
-            return {"policy": "alpha", "context": context, "action": action}
+            return {"policy": "alpha_v2", "context": context, "action": action}
 
         if self._stable_pd >= stable_evals:
             if len(prefill) <= int(self.args.min_prefill):
                 action = {"kind": "noop", "reason": "min_prefill_guard"}
-                return {"policy": "alpha", "context": context, "action": action}
+                return {"policy": "alpha_v2", "context": context, "action": action}
 
             candidates = [w for w in prefill if not self._in_cooldown(now_unix, w.port)]
             if not candidates:
                 action = {"kind": "noop", "reason": "no_prefill_candidate"}
-                return {"policy": "alpha", "context": context, "action": action}
+                return {"policy": "alpha_v2", "context": context, "action": action}
 
             def score_prefill(w: WorkerState) -> float:
                 inflight = _get_metric(w.last_parsed, "num_prefill_inflight_queue_reqs") or 0.0
@@ -198,6 +206,6 @@ class PolicyAlpha(object):
                     "num_running_reqs": _get_metric(chosen.last_parsed, "num_running_reqs"),
                 },
             }
-            return {"policy": "alpha", "context": context, "action": action}
+            return {"policy": "alpha_v2", "context": context, "action": action}
 
-        return {"policy": "alpha", "context": context, "action": action}
+        return {"policy": "alpha_v2", "context": context, "action": action}

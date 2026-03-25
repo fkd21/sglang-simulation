@@ -121,6 +121,7 @@ class PolicyAlphaSim(object):
         stable_evals = int(self.args.stable_evals)
         idle_k = int(self.args.idle_scrapes)
         allow_decode_to_prefill = getattr(self.args, "alpha_allow_decode_to_prefill", True)
+        allow_prefill_to_decode = getattr(self.args, "alpha_allow_prefill_to_decode", True)
 
         # Decode→Prefill transition (alpha high)
         if allow_decode_to_prefill and self._stable_dp >= stable_evals:
@@ -164,7 +165,7 @@ class PolicyAlphaSim(object):
             return {"policy": "alpha", "context": context, "action": action}
 
         # Prefill→Decode transition (alpha low) - NEW LOGIC
-        if self._stable_pd >= stable_evals:
+        if allow_prefill_to_decode and self._stable_pd >= stable_evals:
             if len(prefill) <= int(getattr(self.args, "min_prefill", 1)):
                 action = {"kind": "noop", "reason": "min_prefill_guard"}
                 return {"policy": "alpha", "context": context, "action": action}

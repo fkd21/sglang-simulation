@@ -14,6 +14,7 @@ import argparse
 
 from mechanisms.worker_state import WorkerState
 from mechanisms.policy_alpha_sim import PolicyAlphaSim
+from mechanisms.policy_alpha_sim_v2 import PolicyAlphaSimV2
 from mechanisms.policy_v1_sim import PolicyV1Sim
 from mechanisms.policy_throughput_sim import PolicyThroughputSim
 from core.event import Event, EventType
@@ -33,6 +34,11 @@ class PolicyMonitor:
         alpha_threshold: float = 1.0,
         alpha_threshold_down: float = 0.5,
         alpha_allow_decode_to_prefill: bool = True,
+        alpha_allow_prefill_to_decode: bool = True,
+        # Alpha V2 policy params (with decode pressure)
+        alpha_v2_threshold: float = 1.0,
+        alpha_v2_allow_decode_to_prefill: bool = True,
+        alpha_v2_allow_prefill_to_decode: bool = True,
         # V1 policy params
         prefill_high: float = 10.0,
         prefill_low: float = 2.0,
@@ -74,7 +80,7 @@ class PolicyMonitor:
         """
         self.policy = policy
         self.monitor_interval_s = monitor_interval_s
-        self.enabled = policy in ["alpha", "v1", "throughput"]
+        self.enabled = policy in ["alpha", "alpha_v2", "v1", "throughput"]
         self.slo_target = slo_target
 
         # Initialize policy implementation
@@ -83,6 +89,7 @@ class PolicyMonitor:
                 alpha_threshold=alpha_threshold,
                 alpha_threshold_down=alpha_threshold_down,
                 alpha_allow_decode_to_prefill=alpha_allow_decode_to_prefill,
+                alpha_allow_prefill_to_decode=alpha_allow_prefill_to_decode,
                 stable_evals=stable_evals,
                 global_cooldown_s=global_cooldown_s,
                 per_worker_cooldown_s=per_worker_cooldown_s,
@@ -91,6 +98,25 @@ class PolicyMonitor:
                 idle_scrapes=idle_scrapes,
             )
             self._policy_impl = PolicyAlphaSim(args)
+        elif policy == "alpha_v2":
+            args = argparse.Namespace(
+                alpha_threshold=alpha_v2_threshold,
+                alpha_allow_decode_to_prefill=alpha_v2_allow_decode_to_prefill,
+                alpha_allow_prefill_to_decode=alpha_v2_allow_prefill_to_decode,
+                decode_low=decode_low,
+                decode_high=decode_high,
+                decode_prealloc_weight=decode_prealloc_weight,
+                decode_transfer_weight=decode_transfer_weight,
+                decode_active_weight=decode_active_weight,
+                decode_prefill_prealloc_weight=decode_prefill_prealloc_weight,
+                stable_evals=stable_evals,
+                global_cooldown_s=global_cooldown_s,
+                per_worker_cooldown_s=per_worker_cooldown_s,
+                min_decode=min_decode,
+                min_prefill=min_prefill,
+                idle_scrapes=idle_scrapes,
+            )
+            self._policy_impl = PolicyAlphaSimV2(args)
         elif policy == "v1":
             args = argparse.Namespace(
                 stable_evals=stable_evals,
@@ -244,6 +270,7 @@ class PolicyMonitor:
         if role == "prefill":
             # PrefillInstance specific
             metrics["num_prefill_inflight_queue_reqs"] = len(instance.inflight_queue)
+            metrics["num_prefill_prealloc_queue_reqs"] = 0  # Prefill doesn't have prealloc queue yet
             # Compute max_alpha from waiting queue using real SGLang definition:
             # alpha_i = cumulative_vit / (SLO - waiting_time - transfer_time)
             max_alpha = 0.0
