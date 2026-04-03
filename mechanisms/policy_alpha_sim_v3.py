@@ -1,30 +1,31 @@
+"""Policy Alpha V3 (Simulation Version with Decode Memory Guard).
+
+Alpha-based role switching policy for simulation with decode memory guard.
+This is adapted from policy_alpha_sim_v2.py with:
+1. Memory-based guard instead of decode pressure (queue-based)
+2. Uses max KV cache utilization across decode workers
+3. More stable switching based on memory patterns
+"""
+
 import argparse
 from typing import Any, Dict, List
 
-from monitor.metrics import _get_metric, _idle_for_k_scrapes
-from monitor.state import WorkerState
+from mechanisms.worker_state import WorkerState, _get_metric, _idle_for_k_scrapes
 
 
-class PolicyV1(object):
-    """Policy v1: propose a single decode<->prefill role switch based on queue pressure.
-
-    Definitions (aggregated across currently-healthy workers):
-      prefill_pressure = Σ(prefill.prealloc) + a*Σ(prefill.inflight) + b*Σ(prefill.queue)
-      decode_pressure  = Σ(decode.prealloc) + c*Σ(decode.transfer) + d*Σ(decode.queue)
+class PolicyAlphaSimV3(object):
+    """Policy alpha v3: alpha-led switching with decode-memory guard.
 
     Direction:
-      - if prefill_pressure is high AND decode_pressure is low => propose decode -> prefill
-      - if decode_pressure is high AND prefill_pressure is low => propose prefill -> decode
+      - if max_prefill_alpha > alpha_threshold_high AND max_decode_memory_usage < decode_memory_low
+        for N stable evals => propose decode -> prefill
+      - if max_prefill_alpha < alpha_threshold_low AND max_decode_memory_usage > decode_memory_high
+        for N stable evals => propose prefill -> decode
 
-    Guardrails:
-      - stable-evals: require the same direction condition N evals in a row
-      - min-prefill/min-decode: never propose violating minimum counts
-      - global cooldown + per-worker cooldown
-      - (soft preference) prefer candidates idle for K scrapes (num_running_reqs == 0), but do not require it
-
-    Output:
-      - returns a structured decision dict; caller decides how to log/actuate
-      - decision-only (no switching in this step)
+    Notes:
+      - Candidate selection and cooldown guardrails mirror PolicyV1 and V2.
+      - Memory-based approach should be more stable than queue-based.
+      - Uses dual alpha thresholds (low=0.6, high=1.0) for better hysteresis.
     """
 
     def __init__(self, args: argparse.Namespace):
@@ -58,15 +59,6 @@ class PolicyV1(object):
                     tot += v
             return tot
 
-        def avg_role(role_workers: List[WorkerState], metric: str) -> float:
-            if not role_workers:
-                return 0.0
-            tot = 0.0
-            for w in role_workers:
-                v = _get_metric(w.last_parsed, metric)
-                tot += float(v) if isinstance(v, (int, float)) else 0.0
-            return tot / float(len(role_workers))
-
         def max_role(role_workers: List[WorkerState], metric: str) -> float:
             if not role_workers:
                 return 0.0
@@ -78,26 +70,34 @@ class PolicyV1(object):
                     best = candidate
             return best
 
-        # Prefill pressure: waiting queue + active (+ optional inflight).
-        prefill_pressure = (
-            float(self.args.prefill_wait_weight) * sum_role(prefill, "num_queue_reqs")
-            + float(self.args.prefill_active_weight) * sum_role(prefill, "num_running_reqs")
-            + float(self.args.prefill_inflight_weight) * sum_role(prefill, "num_prefill_inflight_queue_reqs")
-        )
-        # Decode pressure: decode prealloc + transfer + active (+ optional cross: prefill prealloc).
-        decode_pressure = (
-            float(self.args.decode_prealloc_weight) * sum_role(decode, "num_decode_prealloc_queue_reqs")
-            + float(self.args.decode_transfer_weight) * sum_role(decode, "num_decode_transfer_queue_reqs")
-            + float(self.args.decode_active_weight) * sum_role(decode, "num_running_reqs")
-            + float(self.args.decode_prefill_prealloc_weight) * sum_role(prefill, "num_prefill_prealloc_queue_reqs")
-        )
+        def avg_role(role_workers: List[WorkerState], metric: str) -> float:
+            if not role_workers:
+                return 0.0
+            tot = 0.0
+            for w in role_workers:
+                v = _get_metric(w.last_parsed, metric)
+                tot += float(v) if isinstance(v, (int, float)) else 0.0
+            return tot / float(len(role_workers))
 
-        dp_condition = (prefill_pressure > float(self.args.prefill_high)) and (
-            decode_pressure < float(self.args.decode_low)
-        )
-        pd_condition = (decode_pressure > float(self.args.decode_high)) and (
-            prefill_pressure < float(self.args.prefill_low)
-        )
+        max_prefill_alpha = max_role(prefill, "max_alpha")
+        avg_prefill_alpha = avg_role(prefill, "max_alpha")
+        alpha_threshold_low = float(getattr(self.args, "alpha_threshold_low", 0.6))
+        alpha_threshold_high = float(getattr(self.args, "alpha_threshold_high", 1.0))
+
+        # Calculate max memory usage across decode workers
+        max_decode_memory_usage = 0.0
+        for w in decode:
+            total_kv = _get_metric(w.last_parsed, "total_kv_tokens")
+            free_kv = _get_metric(w.last_parsed, "free_kv_tokens")
+            if total_kv and total_kv > 0:
+                usage = 1.0 - (free_kv / total_kv)
+                max_decode_memory_usage = max(max_decode_memory_usage, usage)
+
+        # Decode→Prefill: high alpha, low memory usage (decode underutilized)
+        dp_condition = (max_prefill_alpha > alpha_threshold_high) and (max_decode_memory_usage < float(self.args.decode_memory_low))
+
+        # Prefill→Decode: low alpha, high memory usage (decode overloaded)
+        pd_condition = (max_prefill_alpha < alpha_threshold_low) and (max_decode_memory_usage > float(self.args.decode_memory_high))
 
         if dp_condition and not pd_condition:
             self._stable_dp += 1
@@ -111,43 +111,47 @@ class PolicyV1(object):
 
         prefill_throughput = sum_role(prefill, "req_throughput")
         decode_throughput = sum_role(decode, "req_throughput")
-        max_prefill_alpha = max_role(prefill, "max_alpha")
-        avg_prefill_alpha = avg_role(prefill, "max_alpha")
 
         context = {
-            "prefill_pressure": prefill_pressure,
-            "decode_pressure": decode_pressure,
-            "prefill_count": len(prefill),
-            "decode_count": len(decode),
+            "max_decode_memory_usage": max_decode_memory_usage,
+            "decode_memory_low": float(self.args.decode_memory_low),
+            "decode_memory_high": float(self.args.decode_memory_high),
             "max_prefill_alpha": max_prefill_alpha,
             "avg_prefill_alpha": avg_prefill_alpha,
+            "decision_prefill_alpha": max_prefill_alpha,
+            "alpha_threshold_low": alpha_threshold_low,
+            "alpha_threshold_high": alpha_threshold_high,
             "dp_condition": dp_condition,
             "pd_condition": pd_condition,
             "stable_dp": self._stable_dp,
             "stable_pd": self._stable_pd,
+            "prefill_count": len(prefill),
+            "decode_count": len(decode),
             "prefill_throughput": prefill_throughput,
             "decode_throughput": decode_throughput,
         }
 
         action = {"kind": "noop", "reason": "no_condition_met"}  # type: Dict[str, Any]
 
-        # global cooldown
         if self._last_proposal_unix and (now_unix - self._last_proposal_unix) < float(self.args.global_cooldown_s):
             action = {"kind": "noop", "reason": "global_cooldown"}
-            return {"policy": "v1", "context": context, "action": action}
+            return {"policy": "alpha_v3", "context": context, "action": action}
 
         stable_evals = int(self.args.stable_evals)
         idle_k = int(self.args.idle_scrapes)
+        allow_decode_to_prefill = getattr(self.args, "alpha_allow_decode_to_prefill", True)
+        allow_prefill_to_decode = getattr(self.args, "alpha_allow_prefill_to_decode", True)
 
-        if self._stable_dp >= stable_evals:
+        # Decode→Prefill transition (alpha high, memory usage low)
+        if allow_decode_to_prefill and self._stable_dp >= stable_evals:
             if len(decode) <= int(self.args.min_decode):
                 action = {"kind": "noop", "reason": "min_decode_guard"}
-                return {"policy": "v1", "context": context, "action": action}
+                return {"policy": "alpha_v3", "context": context, "action": action}
 
             candidates = [w for w in decode if not self._in_cooldown(now_unix, w.port)]
             if not candidates:
                 action = {"kind": "noop", "reason": "no_decode_candidate"}
-                return {"policy": "v1", "context": context, "action": action}
+                return {"policy": "alpha_v3", "context": context, "action": action}
 
             def score_decode(w: WorkerState) -> float:
                 transfer = _get_metric(w.last_parsed, "num_decode_transfer_queue_reqs") or 0.0
@@ -156,7 +160,6 @@ class PolicyV1(object):
                 return transfer + prealloc + queue
 
             def key_decode(w: WorkerState) -> Any:
-                # Prefer idle-for-K if available, then lower running, then lower local queues.
                 idle_pref = 0 if _idle_for_k_scrapes(w, idle_k) else 1
                 running = _get_metric(w.last_parsed, "num_running_reqs")
                 running_val = float(running) if running is not None else float("inf")
@@ -169,7 +172,7 @@ class PolicyV1(object):
             self._stable_pd = 0
             action = {
                 "kind": "switch_proposed",
-                "reason": "prefill_high_decode_low",
+                "reason": "alpha_high_memory_low",
                 "port": chosen.port,
                 "from_role": "decode",
                 "to_role": "prefill",
@@ -178,17 +181,18 @@ class PolicyV1(object):
                     "num_running_reqs": _get_metric(chosen.last_parsed, "num_running_reqs"),
                 },
             }
-            return {"policy": "v1", "context": context, "action": action}
+            return {"policy": "alpha_v3", "context": context, "action": action}
 
-        if self._stable_pd >= stable_evals:
+        # Prefill→Decode transition (alpha low, memory usage high)
+        if allow_prefill_to_decode and self._stable_pd >= stable_evals:
             if len(prefill) <= int(self.args.min_prefill):
                 action = {"kind": "noop", "reason": "min_prefill_guard"}
-                return {"policy": "v1", "context": context, "action": action}
+                return {"policy": "alpha_v3", "context": context, "action": action}
 
             candidates = [w for w in prefill if not self._in_cooldown(now_unix, w.port)]
             if not candidates:
                 action = {"kind": "noop", "reason": "no_prefill_candidate"}
-                return {"policy": "v1", "context": context, "action": action}
+                return {"policy": "alpha_v3", "context": context, "action": action}
 
             def score_prefill(w: WorkerState) -> float:
                 inflight = _get_metric(w.last_parsed, "num_prefill_inflight_queue_reqs") or 0.0
@@ -209,7 +213,7 @@ class PolicyV1(object):
             self._stable_pd = 0
             action = {
                 "kind": "switch_proposed",
-                "reason": "decode_high_prefill_low",
+                "reason": "alpha_low_memory_high",
                 "port": chosen.port,
                 "from_role": "prefill",
                 "to_role": "decode",
@@ -218,6 +222,6 @@ class PolicyV1(object):
                     "num_running_reqs": _get_metric(chosen.last_parsed, "num_running_reqs"),
                 },
             }
-            return {"policy": "v1", "context": context, "action": action}
+            return {"policy": "alpha_v3", "context": context, "action": action}
 
-        return {"policy": "v1", "context": context, "action": action}
+        return {"policy": "alpha_v3", "context": context, "action": action}

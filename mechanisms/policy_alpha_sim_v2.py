@@ -127,8 +127,11 @@ class PolicyAlphaSimV2(object):
 
         stable_evals = int(self.args.stable_evals)
         idle_k = int(self.args.idle_scrapes)
+        allow_decode_to_prefill = getattr(self.args, "alpha_allow_decode_to_prefill", True)
+        allow_prefill_to_decode = getattr(self.args, "alpha_allow_prefill_to_decode", True)
 
-        if self._stable_dp >= stable_evals:
+        # Decode→Prefill transition (alpha high, decode pressure low)
+        if allow_decode_to_prefill and self._stable_dp >= stable_evals:
             if len(decode) <= int(self.args.min_decode):
                 action = {"kind": "noop", "reason": "min_decode_guard"}
                 return {"policy": "alpha_v2", "context": context, "action": action}
@@ -168,7 +171,8 @@ class PolicyAlphaSimV2(object):
             }
             return {"policy": "alpha_v2", "context": context, "action": action}
 
-        if self._stable_pd >= stable_evals:
+        # Prefill→Decode transition (alpha low, decode pressure high)
+        if allow_prefill_to_decode and self._stable_pd >= stable_evals:
             if len(prefill) <= int(self.args.min_prefill):
                 action = {"kind": "noop", "reason": "min_prefill_guard"}
                 return {"policy": "alpha_v2", "context": context, "action": action}

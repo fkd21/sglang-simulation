@@ -411,11 +411,16 @@ class MetricsCollector:
             p99_itl = safe_percentile(self.itl_reservoir, 99)
 
             # SLA attainment rates
-            ttft_sla_attainment = (self.ttft_sla_met_count / self.ttft_count * 100) if self.ttft_count > 0 else 0.0
-            itl_sla_attainment = (self.itl_sla_met_count / self.itl_count * 100) if self.itl_count > 0 else 0.0
-            # Overall SLA (both must meet)
-            min_count = min(self.ttft_count, self.itl_count)
-            sla_attainment_rate = (self.both_sla_met_count / min_count * 100) if min_count > 0 else 0.0
+            # IMPORTANT: Dropped requests count as SLA violations (they are included in denominator)
+            total_requests_served = self.ttft_count + num_dropped
+            ttft_sla_attainment = (self.ttft_sla_met_count / total_requests_served * 100) if total_requests_served > 0 else 0.0
+
+            total_requests_with_decode = self.itl_count + num_dropped
+            itl_sla_attainment = (self.itl_sla_met_count / total_requests_with_decode * 100) if total_requests_with_decode > 0 else 0.0
+
+            # Overall SLA (both must meet) - dropped requests count as violations
+            total_for_overall_sla = min(self.ttft_count, self.itl_count) + num_dropped
+            sla_attainment_rate = (self.both_sla_met_count / total_for_overall_sla * 100) if total_for_overall_sla > 0 else 0.0
         else:
             # Legacy: use stored lists
             e2e_latencies = [lat for _, _, lat in self.completions]
@@ -432,12 +437,17 @@ class MetricsCollector:
             p50_itl = safe_percentile(self.itl_values, 50)
             p99_itl = safe_percentile(self.itl_values, 99)
 
-            ttft_sla_attainment = (sum(self.ttft_sla_met) / len(self.ttft_sla_met) * 100) if self.ttft_sla_met else 0.0
-            itl_sla_attainment = (sum(self.itl_sla_met) / len(self.itl_sla_met) * 100) if self.itl_sla_met else 0.0
+            # IMPORTANT: Dropped requests count as SLA violations (they are included in denominator)
+            total_requests_served = len(self.ttft_sla_met) + num_dropped
+            ttft_sla_attainment = (sum(self.ttft_sla_met) / total_requests_served * 100) if total_requests_served > 0 else 0.0
+
+            total_requests_with_decode = len(self.itl_sla_met) + num_dropped
+            itl_sla_attainment = (sum(self.itl_sla_met) / total_requests_with_decode * 100) if total_requests_with_decode > 0 else 0.0
 
             if self.ttft_sla_met and self.itl_sla_met:
                 both_met = [ttft and itl for ttft, itl in zip(self.ttft_sla_met, self.itl_sla_met)]
-                sla_attainment_rate = (sum(both_met) / len(both_met) * 100) if both_met else 0.0
+                total_for_overall_sla = len(both_met) + num_dropped
+                sla_attainment_rate = (sum(both_met) / total_for_overall_sla * 100) if total_for_overall_sla > 0 else 0.0
             else:
                 sla_attainment_rate = 0.0
 

@@ -2,6 +2,7 @@
 *.json
 *.csv
 *.jsonl
+*.png
 
 # Python
 __pycache__/

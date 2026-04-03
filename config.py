@@ -65,11 +65,38 @@ class SimConfig:
     alpha_v2_allow_decode_to_prefill: bool = True
     alpha_v2_allow_prefill_to_decode: bool = True
 
+    # Alpha V3 policy parameters (with decode memory guard)
+    alpha_v3_threshold_low: float = 0.6   # Below 0.6 → alpha low (decode bottleneck)
+    alpha_v3_threshold_high: float = 1.0  # Above 1.0 → alpha high (prefill bottleneck)
+    alpha_v3_allow_decode_to_prefill: bool = True
+    alpha_v3_allow_prefill_to_decode: bool = True
+    decode_memory_low: float = 0.4   # Below 40% usage → decode underutilized
+    decode_memory_high: float = 0.8  # Above 80% usage → decode overloaded
+
+    # Alpha V4 policy parameters (with average decode memory guard and p95 alpha)
+    alpha_v4_threshold_low: float = 0.6   # Below 0.6 → alpha low (decode bottleneck)
+    alpha_v4_threshold_high: float = 1.0  # Above 1.0 → alpha high (prefill bottleneck)
+    alpha_v4_allow_decode_to_prefill: bool = True
+    alpha_v4_allow_prefill_to_decode: bool = True
+
+    # Alpha V5 policy parameters (with Kalman Filter prediction)
+    alpha_v5_threshold_low: float = 0.6   # Below 0.6 → alpha low (decode bottleneck)
+    alpha_v5_threshold_high: float = 1.0  # Above 1.0 → alpha high (prefill bottleneck)
+    alpha_v5_allow_decode_to_prefill: bool = True
+    alpha_v5_allow_prefill_to_decode: bool = True
+
+    # Kalman Filter parameters (for Alpha V5)
+    kf_process_noise: float = 0.01         # Process noise covariance (lower = smoother)
+    kf_measurement_noise: float = 0.1      # Measurement noise variance (higher = less trust)
+    kf_prediction_steps: int = 3           # Prediction horizon (3 steps = 15s with 5s interval)
+    kf_velocity_threshold: float = 0.05    # Velocity threshold for adaptive stable_evals
+    kf_min_stable_evals: int = 2           # Minimum stable_evals when velocity is high
+
     # V1 policy parameters
     prefill_pressure_high: float = 10.0
     prefill_pressure_low: float = 2.0
-    decode_pressure_high: float = 10.0
-    decode_pressure_low: float = 2.0
+    decode_pressure_high: float = 12.0  # Prefill→Decode: need very high decode pressure
+    decode_pressure_low: float = 6.0    # Decode→Prefill: need relatively low decode pressure
     prefill_wait_weight: float = 1.0
     prefill_active_weight: float = 0.5
     prefill_inflight_weight: float = 0.3
@@ -79,7 +106,7 @@ class SimConfig:
     decode_prefill_prealloc_weight: float = 0.3
 
     # Common policy parameters
-    stable_evals: int = 3
+    stable_evals: int = 5
     global_cooldown_s: float = 30.0
     per_worker_cooldown_s: float = 60.0
     min_prefill_instances: int = 1

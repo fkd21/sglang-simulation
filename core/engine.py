@@ -91,6 +91,29 @@ class SimulationEngine:
             alpha_v2_threshold=config.alpha_v2_threshold,
             alpha_v2_allow_decode_to_prefill=config.alpha_v2_allow_decode_to_prefill,
             alpha_v2_allow_prefill_to_decode=config.alpha_v2_allow_prefill_to_decode,
+            # Alpha V3 params
+            alpha_v3_threshold_low=config.alpha_v3_threshold_low,
+            alpha_v3_threshold_high=config.alpha_v3_threshold_high,
+            alpha_v3_allow_decode_to_prefill=config.alpha_v3_allow_decode_to_prefill,
+            alpha_v3_allow_prefill_to_decode=config.alpha_v3_allow_prefill_to_decode,
+            decode_memory_low=config.decode_memory_low,
+            decode_memory_high=config.decode_memory_high,
+            # Alpha V4 params
+            alpha_v4_threshold_low=config.alpha_v4_threshold_low,
+            alpha_v4_threshold_high=config.alpha_v4_threshold_high,
+            alpha_v4_allow_decode_to_prefill=config.alpha_v4_allow_decode_to_prefill,
+            alpha_v4_allow_prefill_to_decode=config.alpha_v4_allow_prefill_to_decode,
+            # Alpha V5 params
+            alpha_v5_threshold_low=config.alpha_v5_threshold_low,
+            alpha_v5_threshold_high=config.alpha_v5_threshold_high,
+            alpha_v5_allow_decode_to_prefill=config.alpha_v5_allow_decode_to_prefill,
+            alpha_v5_allow_prefill_to_decode=config.alpha_v5_allow_prefill_to_decode,
+            # Kalman Filter params
+            kf_process_noise=config.kf_process_noise,
+            kf_measurement_noise=config.kf_measurement_noise,
+            kf_prediction_steps=config.kf_prediction_steps,
+            kf_velocity_threshold=config.kf_velocity_threshold,
+            kf_min_stable_evals=config.kf_min_stable_evals,
             # V1 params
             prefill_high=config.prefill_pressure_high,
             prefill_low=config.prefill_pressure_low,
@@ -1578,24 +1601,18 @@ class SimulationEngine:
     ) -> bool:
         """Check if a decode instance can accept offloaded prefill work.
 
-        Returns False if decode memory is too tight to handle additional
-        offloaded tokens (i.e., decode is effectively "batch full").
+        INVARIANT: All requests in prefill waiting_queue have decode reservations
+        (enforced by bootstrap admission being the only entry point).
+
+        Offloading is always allowed for requests with reservations because:
+        - Memory for final KV cache is already reserved
+        - Offloading only changes WHERE prefill computation happens
+        - No additional decode memory needed beyond existing reservation
+
+        Returns:
+            True - all prefill waiting_queue requests can offload
         """
-        available = decode_instance.token_to_kv_pool.available_size()
-        evictable = decode_instance.tree_cache.evictable_size
-
-        # Account for virtual reservations and in-flight requests
-        reserved = sum(
-            r.context_tokens for r in decode_instance.prealloc_reserved
-        )
-        transfer_tokens = sum(
-            r.context_tokens for r in decode_instance.transfer_queue
-        )
-
-        effective_available = available + evictable - reserved - transfer_tokens
-
-        # Need enough space for the request's context tokens plus some headroom
-        return effective_available > req.context_tokens
+        return True
 
     def _try_schedule_decode(self, instance: DecodeInstance) -> List[Event]:
         """Try to schedule decode batch on instance.

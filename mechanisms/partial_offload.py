@@ -331,8 +331,11 @@ class DynamicBetaSolver:
                 # Check remaining budget
                 budget_remaining = decode_budget - budget_used
                 if budget_remaining <= 1e-6:
-                    feasible = False
-                    break
+                    # Budget exhausted - return current partial solution immediately
+                    # Don't continue processing more requests in outer loop
+                    betas = [float(min(max(val, 0.0), 1.0)) if val > BETA_THRESHOLD else 0.0
+                             for val in betas]
+                    return betas, False, time.perf_counter() - t_start
 
                 # Maximum beta increase
                 room = 1.0 - betas[j]
@@ -348,6 +351,8 @@ class DynamicBetaSolver:
                 deficit -= increase * rate
                 budget_used += increase * c[j]
 
+            # If constraint not satisfied, mark as infeasible but continue
+            # (partial solution is still useful, like in solve() without budget)
             if deficit > 1e-9:
                 feasible = False
 
@@ -357,10 +362,8 @@ class DynamicBetaSolver:
 
         solve_time = time.perf_counter() - t_start
 
-        # Fallback: prioritize decode protection
-        if not feasible:
-            return [0.0] * n, False, solve_time
-
+        # Return partial solution even if not fully feasible
+        # (consistent with solve() behavior - partial offloading is better than nothing)
         return betas, feasible, solve_time
 
     def _all_slo_met_at_zero(
@@ -383,5 +386,5 @@ class DynamicBetaSolver:
             rhs = self.slo_target - queue_wait
             if total > rhs:
                 return False
-            current_time = start + prefill_duration
+            #current_time = start + prefill_duration
         return True

@@ -1,4 +1,7 @@
-"""Run Offload with Protection Budget Sweep: Test budget_scaling_factor from 1.0 to 2.0"""
+"""Run Alpha V2-Only Experiment: Alpha V2 + Alpha V2 with Offload (only decode→prefill switching allowed)
+
+Alpha V2 uses decode pressure guard for more conservative role switching.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from core.engine import SimulationEngine
 
 
 # Paths
-AZURE_TRACE_1H = Path(__file__).resolve().parent.parent / "azure_code_1h.csv"
+AZURE_TRACE_1H = Path(__file__).resolve().parent.parent / "AzureLLMInferenceTrace_code_1week_50pct.csv"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
@@ -30,9 +33,9 @@ def _run_one(args: Tuple) -> Dict[str, Any]:
     print(f"[START] Running simulation: {label}", flush=True)
     print(f"  - Policy: {extras.get('policy', 'N/A')}", flush=True)
     print(f"  - Offload mode: {extras.get('offload_mode', 'N/A')}", flush=True)
-    print(f"  - Budget scaling factor: {extras.get('budget_scaling_factor', 'N/A')}", flush=True)
     print(f"  - Switching: {config.enable_switching}, Protection: {config.enable_decode_protection}", flush=True)
-    print(f"  - TPOT SLA: {config.tpot_sla}s", flush=True)
+    print(f"  - Alpha V2 decode→prefill: {config.alpha_v2_allow_decode_to_prefill}", flush=True)
+    print(f"  - Alpha V2 prefill→decode: {config.alpha_v2_allow_prefill_to_decode}", flush=True)
 
     engine = SimulationEngine(config)
     print(f"[SIMULATING] {label} - engine created, starting simulation...", flush=True)
@@ -48,14 +51,13 @@ def _run_one(args: Tuple) -> Dict[str, Any]:
         "enable_dynamic_lp": config.enable_dynamic_lp,
         "enable_decode_protection": config.enable_decode_protection,
         "tpot_sla": config.tpot_sla,
-        "budget_scaling_factor": config.budget_scaling_factor,
         "slo_target": config.slo_target,
         "lp_max_window_size": config.lp_max_window_size,
         "max_prefill_tokens": config.max_prefill_tokens,
         "enable_switching": config.enable_switching,
         "switch_policy": config.switch_policy,
-        "alpha_allow_decode_to_prefill": config.alpha_allow_decode_to_prefill,
-        "alpha_allow_prefill_to_decode": config.alpha_allow_prefill_to_decode,
+        "alpha_v2_allow_decode_to_prefill": config.alpha_v2_allow_decode_to_prefill,
+        "alpha_v2_allow_prefill_to_decode": config.alpha_v2_allow_prefill_to_decode,
     }
     d.update(extras)
     return d
@@ -130,51 +132,56 @@ def _ensure_azure_1h() -> Path:
     )
 
 
-def experiment_offload_with_protection_budget_sweep_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
-    """Sweep budget_scaling_factor from 1.0 to 2.0 for offload with protection.
+def experiment_alpha_v2_only_4p4d(max_workers: Optional[int] = None) -> List[Dict]:
+    """Test alpha_v2 policy only x 3 offload modes at 4p4d with 1h Azure code requests.
 
-    Tests none policy with decode→prefill only switching, offload WITH decode protection enabled.
-    Sweeps budget_scaling_factor in steps of 0.2 to understand impact on offload aggressiveness.
+    Key difference: Only decode→prefill switching is allowed, prefill→decode is disabled.
+    - alpha_v2_allow_decode_to_prefill = True (allow decode → prefill)
+    - alpha_v2_allow_prefill_to_decode = False (disable prefill → decode)
 
-    Configuration:
-    - 7 prefill instances, 1 decode instances
-    - none policy with decode→prefill only (prefill→decode disabled)
-    - Dynamic LP enabled with decode protection
-    - TPOT SLA: 100ms (0.1s)
-    - Budget scaling factor
+    Alpha V2 uses decode pressure guard for more conservative switching compared to Alpha.
 
-    Returns:
-        List of result dictionaries for each configuration
+    Policies tested:
+    - alpha_v2: Alpha V2 policy with no offload
+    - alpha_v2_offload: Alpha V2 policy with offload configurations
+
+    Offload modes:
+    - no_offload: baseline without offload
+    - offload_no_protection: offload enabled, no decode protection
+    - offload_with_protection: offload enabled, with decode TPOT protection
     """
     print("\n" + "="*80)
-    print("=== Budget Scaling Factor Sweep (1h trace): Throughput + Offload with Protection ===")
-    print("=== Sweeping budget_scaling_factor from 1.0 to 2.0 in steps of 0.2 ===")
+    print("=== Alpha V2-Only Experiment (1h trace): Alpha V2 + Alpha V2 with Offload (3 configurations) ===")
+    print("=== CRITICAL: Only decode→prefill switching allowed (prefill→decode disabled) ===")
+    print("=== Alpha V2 uses decode pressure guard for conservative switching ===")
     print("="*80 + "\n")
     trace = str(_ensure_azure_1h())
 
-    print(f"[CONFIG] Policy: none (decode→prefill only)")
-    print(f"[CONFIG] Topology: 4 prefill instances, 4 decode instances")
-    print(f"[CONFIG] Offload: enabled with decode protection")
-    print(f"[CONFIG] TPOT SLA: 0.1s (100ms)")
-    print(f"[CONFIG] Budget scaling factors: 1.0, 1.2, 1.4, 1.6, 1.8, 2.0")
-    print(f"[CONFIG] Total configurations: 6\n")
+    # Only test alpha_v2 policy (no other policies)
+    policies = [
+        ("alpha_v2", True, "alpha_v2"),
+    ]
+    print(f"[CONFIG] Testing alpha_v2 policy only")
+    print(f"[CONFIG] Each configuration will be tested with 3 offload modes")
+    print(f"[CONFIG] Total configurations: {len(policies) * 3} = 3\n")
+    print(f"[CONFIG] IMPORTANT: alpha_v2_allow_decode_to_prefill=True in ALL configs")
+    print(f"[CONFIG]            alpha_v2_allow_prefill_to_decode=False in ALL configs")
+    print(f"[CONFIG]            This means ONLY decode→prefill switching is allowed\n")
 
     tasks = []
 
-    # Sweep from 1.0 to 2.0 in steps of 0.2
-    for scaling_factor in [2.2,2.4,2.6,2.8,3,3.2,3.4,3.6,3.8,4.0,4.2,4.4,4.6,4.8]:
+    for policy_name, enable_sw, sw_policy in policies:
+        print(f"\n[SETUP] Configuring tasks for policy: {policy_name}")
+        # 1. Without offload (baseline)
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=6,
-            num_decode_instances=2,
-            enable_switching=True,
-            switch_policy="never",
-            enable_dynamic_lp=True,
-            enable_decode_protection=True,  # Enable decode protection
-            tpot_sla=0.1,  # 100ms TPOT threshold
-            budget_scaling_factor=scaling_factor,  # KEY: Sweep this parameter
-            slo_target=1.0,
-            lp_max_window_size=50,
+            num_prefill_instances=4,
+            num_decode_instances=4,
+            enable_switching=enable_sw,
+            switch_policy=sw_policy,
+            alpha_v2_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
+            alpha_v2_allow_prefill_to_decode=True,  # CRITICAL: Disable prefill→decode
+            enable_dynamic_lp=False,
             # Enable streaming loading to avoid OOM
             enable_streaming_loading=True,
             streaming_window_size=300.0,  # 5 minutes
@@ -185,19 +192,73 @@ def experiment_offload_with_protection_budget_sweep_4p4d(max_workers: Optional[i
         )
         tasks.append((
             config,
-            f"alpha_offload_with_protection_budget_{scaling_factor:.1f}",
-            {
-                "policy": "none",
-                "offload_mode": "offload_with_protection",
-                "budget_scaling_factor": scaling_factor
-            }
+            f"{policy_name}_no_offload",
+            {"policy": policy_name, "offload_mode": "no_offload"},
         ))
-        print(f"  [{len(tasks)}/6] Added: budget_scaling_factor={scaling_factor:.1f}")
+        print(f"  [1/3] Added: {policy_name}_no_offload")
+
+        # 2. With offload, NO decode protection
+        config = SimConfig(
+            trace_path=trace,
+            num_prefill_instances=4,
+            num_decode_instances=4,
+            enable_switching=enable_sw,
+            switch_policy=sw_policy,
+            alpha_v2_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
+            alpha_v2_allow_prefill_to_decode=False,  # CRITICAL: Disable prefill→decode
+            enable_dynamic_lp=True,
+            enable_decode_protection=True,  # Disable decode protection
+            slo_target=1.0,
+            lp_max_window_size=5,
+            # Enable streaming loading to avoid OOM
+            enable_streaming_loading=True,
+            streaming_window_size=300.0,  # 5 minutes
+            streaming_lookback=60.0,       # 1 minute safety buffer
+            # Enable monitoring and periodic plots
+            enable_monitoring=True,
+            monitoring_plot_interval_minutes=60.0,
+        )
+        tasks.append((
+            config,
+            f"{policy_name}_offload_no_protection",
+            {"policy": policy_name, "offload_mode": "offload_no_protection"},
+        ))
+        print(f"  [2/3] Added: {policy_name}_offload_no_protection")
+
+        # 3. With offload, WITH decode protection
+        config = SimConfig(
+            trace_path=trace,
+            num_prefill_instances=4,
+            num_decode_instances=4,
+            enable_switching=enable_sw,
+            switch_policy=sw_policy,
+            alpha_v2_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill
+            alpha_v2_allow_prefill_to_decode=True,  # CRITICAL: Disable prefill→decode
+            enable_dynamic_lp=True,
+            enable_decode_protection=True,  # Enable decode protection
+            tpot_sla=0.1,  # 100ms TPOT threshold
+            budget_scaling_factor=3,
+            slo_target=1.0,
+            lp_max_window_size=5,
+            # Enable streaming loading to avoid OOM
+            enable_streaming_loading=True,
+            streaming_window_size=300.0,  # 5 minutes
+            streaming_lookback=60.0,       # 1 minute safety buffer
+            # Enable monitoring and periodic plots
+            enable_monitoring=True,
+            monitoring_plot_interval_minutes=60.0,
+        )
+        tasks.append((
+            config,
+            f"{policy_name}_offload_with_protection",
+            {"policy": policy_name, "offload_mode": "offload_with_protection"},
+        ))
+        print(f"  [3/3] Added: {policy_name}_offload_with_protection")
 
     print(f"\n[SETUP] Total tasks configured: {len(tasks)}")
     print(f"[SETUP] Task list:")
-    for i, (_, label, extras) in enumerate(tasks, 1):
-        print(f"  {i:2d}. {label} (scaling={extras['budget_scaling_factor']:.1f})")
+    for i, (_, label, _) in enumerate(tasks, 1):
+        print(f"  {i:2d}. {label}")
 
     return run_parallel(tasks, max_workers=max_workers)
 
@@ -205,7 +266,7 @@ def experiment_offload_with_protection_budget_sweep_4p4d(max_workers: Optional[i
 def main():
     import sys
     print("\n" + "="*80)
-    print("BUDGET SCALING FACTOR SWEEP (1H TRACE): none + OFFLOAD WITH PROTECTION")
+    print("ALPHA V2-ONLY EXPERIMENT (1H TRACE): ALPHA V2 POLICY WITH ONLY DECODE→PREFILL")
     print("="*80)
     print(f"[INIT] Results will be saved to {RESULTS_DIR}")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -218,9 +279,9 @@ def main():
         print("!!! TEST MODE: Using 1 worker !!!")
         print("!"*80 + "\n")
 
-    print(f"[INIT] Starting budget scaling factor sweep experiment (1h trace)...")
-    results = experiment_offload_with_protection_budget_sweep_4p4d(max_workers=workers)
-    save_experiment("offload_with_protection_budget_sweep_2p6d", results)
+    print(f"[INIT] Starting alpha_v2-only experiment (1h trace)...")
+    results = experiment_alpha_v2_only_4p4d(max_workers=workers)
+    save_experiment("alpha_v2_only_4p4d", results)
 
     print("\n" + "="*80)
     print("✓ EXPERIMENT COMPLETE!")

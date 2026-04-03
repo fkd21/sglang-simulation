@@ -39,6 +39,29 @@ class PolicyMonitor:
         alpha_v2_threshold: float = 1.0,
         alpha_v2_allow_decode_to_prefill: bool = True,
         alpha_v2_allow_prefill_to_decode: bool = True,
+        # Alpha V3 policy params (with decode memory)
+        alpha_v3_threshold_low: float = 0.6,
+        alpha_v3_threshold_high: float = 1.0,
+        alpha_v3_allow_decode_to_prefill: bool = True,
+        alpha_v3_allow_prefill_to_decode: bool = True,
+        decode_memory_low: float = 0.4,
+        decode_memory_high: float = 0.8,
+        # Alpha V4 policy params (with average decode memory and p95 alpha)
+        alpha_v4_threshold_low: float = 0.6,
+        alpha_v4_threshold_high: float = 1.0,
+        alpha_v4_allow_decode_to_prefill: bool = True,
+        alpha_v4_allow_prefill_to_decode: bool = True,
+        # Alpha V5 policy params (with Kalman Filter prediction)
+        alpha_v5_threshold_low: float = 0.6,
+        alpha_v5_threshold_high: float = 1.0,
+        alpha_v5_allow_decode_to_prefill: bool = True,
+        alpha_v5_allow_prefill_to_decode: bool = True,
+        # Kalman Filter params (for Alpha V5)
+        kf_process_noise: float = 0.01,
+        kf_measurement_noise: float = 0.1,
+        kf_prediction_steps: int = 3,
+        kf_velocity_threshold: float = 0.05,
+        kf_min_stable_evals: int = 2,
         # V1 policy params
         prefill_high: float = 10.0,
         prefill_low: float = 2.0,
@@ -80,7 +103,7 @@ class PolicyMonitor:
         """
         self.policy = policy
         self.monitor_interval_s = monitor_interval_s
-        self.enabled = policy in ["alpha", "alpha_v2", "v1", "throughput"]
+        self.enabled = policy in ["alpha", "alpha_v2", "alpha_v3", "alpha_v4", "alpha_v5", "v1", "throughput"]
         self.slo_target = slo_target
 
         # Initialize policy implementation
@@ -117,6 +140,64 @@ class PolicyMonitor:
                 idle_scrapes=idle_scrapes,
             )
             self._policy_impl = PolicyAlphaSimV2(args)
+        elif policy == "alpha_v3":
+            args = argparse.Namespace(
+                alpha_threshold_low=alpha_v3_threshold_low,
+                alpha_threshold_high=alpha_v3_threshold_high,
+                alpha_allow_decode_to_prefill=alpha_v3_allow_decode_to_prefill,
+                alpha_allow_prefill_to_decode=alpha_v3_allow_prefill_to_decode,
+                decode_memory_low=decode_memory_low,
+                decode_memory_high=decode_memory_high,
+                stable_evals=stable_evals,
+                global_cooldown_s=global_cooldown_s,
+                per_worker_cooldown_s=per_worker_cooldown_s,
+                min_decode=min_decode,
+                min_prefill=min_prefill,
+                idle_scrapes=idle_scrapes,
+            )
+            from mechanisms.policy_alpha_sim_v3 import PolicyAlphaSimV3
+            self._policy_impl = PolicyAlphaSimV3(args)
+        elif policy == "alpha_v4":
+            args = argparse.Namespace(
+                alpha_threshold_low=alpha_v4_threshold_low,
+                alpha_threshold_high=alpha_v4_threshold_high,
+                alpha_allow_decode_to_prefill=alpha_v4_allow_decode_to_prefill,
+                alpha_allow_prefill_to_decode=alpha_v4_allow_prefill_to_decode,
+                decode_memory_low=decode_memory_low,
+                decode_memory_high=decode_memory_high,
+                stable_evals=stable_evals,
+                global_cooldown_s=global_cooldown_s,
+                per_worker_cooldown_s=per_worker_cooldown_s,
+                min_decode=min_decode,
+                min_prefill=min_prefill,
+                idle_scrapes=idle_scrapes,
+            )
+            from mechanisms.policy_alpha_sim_v4 import PolicyAlphaSimV4
+            self._policy_impl = PolicyAlphaSimV4(args)
+        elif policy == "alpha_v5":
+            args = argparse.Namespace(
+                alpha_threshold_low=alpha_v5_threshold_low,
+                alpha_threshold_high=alpha_v5_threshold_high,
+                alpha_allow_decode_to_prefill=alpha_v5_allow_decode_to_prefill,
+                alpha_allow_prefill_to_decode=alpha_v5_allow_prefill_to_decode,
+                decode_memory_low=decode_memory_low,
+                decode_memory_high=decode_memory_high,
+                stable_evals=stable_evals,
+                global_cooldown_s=global_cooldown_s,
+                per_worker_cooldown_s=per_worker_cooldown_s,
+                min_decode=min_decode,
+                min_prefill=min_prefill,
+                idle_scrapes=idle_scrapes,
+                # Kalman Filter params
+                monitor_interval_s=monitor_interval_s,
+                kf_process_noise=kf_process_noise,
+                kf_measurement_noise=kf_measurement_noise,
+                kf_prediction_steps=kf_prediction_steps,
+                kf_velocity_threshold=kf_velocity_threshold,
+                kf_min_stable_evals=kf_min_stable_evals,
+            )
+            from mechanisms.policy_alpha_sim_v5 import PolicyAlphaSimV5
+            self._policy_impl = PolicyAlphaSimV5(args)
         elif policy == "v1":
             args = argparse.Namespace(
                 stable_evals=stable_evals,
@@ -295,6 +376,9 @@ class PolicyMonitor:
             # DecodeInstance specific
             metrics["num_decode_transfer_queue_reqs"] = len(instance.transfer_queue)
             metrics["num_decode_prealloc_queue_reqs"] = len(instance.prealloc_queue)
+            # Add memory metrics for v3 policy
+            metrics["total_kv_tokens"] = instance.token_to_kv_pool.total_kv_tokens
+            metrics["free_kv_tokens"] = instance.token_to_kv_pool.available_size()
 
         return WorkerState(
             port=port,
