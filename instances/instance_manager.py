@@ -7,24 +7,26 @@ from typing import List, Optional
 from instances.base_instance import InstanceType, SimInstance
 from instances.decode_instance import DecodeInstance
 from instances.prefill_instance import PrefillInstance
+from utils.constants import TOTAL_KV_CACHE_TOKENS
 
 
 class InstanceManager:
     """Manages prefill and decode instances."""
 
-    def __init__(self, num_prefill: int, num_decode: int):
+    def __init__(self, num_prefill: int, num_decode: int, total_kv_tokens: int = TOTAL_KV_CACHE_TOKENS):
         """Initialize instance manager.
 
         Args:
             num_prefill: Number of prefill instances
             num_decode: Number of decode instances
+            total_kv_tokens: KV cache capacity per instance in tokens
         """
         self.prefill_instances: List[PrefillInstance] = [
-            PrefillInstance(instance_id=f"prefill_{i}")
+            PrefillInstance(instance_id=f"prefill_{i}", total_kv_tokens=total_kv_tokens)
             for i in range(num_prefill)
         ]
         self.decode_instances: List[DecodeInstance] = [
-            DecodeInstance(instance_id=f"decode_{i}")
+            DecodeInstance(instance_id=f"decode_{i}", total_kv_tokens=total_kv_tokens)
             for i in range(num_decode)
         ]
 

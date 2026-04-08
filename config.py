@@ -32,6 +32,7 @@ class SimConfig:
     trace_path: str
     num_prefill_instances: int = 1
     num_decode_instances: int = 1
+    gpu_type: str = "A100_40GB"  # GPU hardware profile: "A100_40GB" or "A100_80GB"
 
     # New mechanisms
     M: int = 0
@@ -84,6 +85,14 @@ class SimConfig:
     alpha_v5_threshold_high: float = 1.0  # Above 1.0 → alpha high (prefill bottleneck)
     alpha_v5_allow_decode_to_prefill: bool = True
     alpha_v5_allow_prefill_to_decode: bool = True
+
+    # Alpha V6 policy parameters (allocatable-ratio-based memory guard)
+    alpha_v6_threshold_low: float = 0.6   # Below 0.6 → alpha low (decode bottleneck)
+    alpha_v6_threshold_high: float = 1.0  # Above 1.0 → alpha high (prefill bottleneck)
+    alpha_v6_allow_decode_to_prefill: bool = True
+    alpha_v6_allow_prefill_to_decode: bool = True
+    decode_allocatable_low: float = 0.2   # pd trigger: avg allocatable_ratio < this (decode tight)
+    decode_allocatable_high: float = 0.6  # dp trigger: avg allocatable_ratio > this (decode roomy)
 
     # Kalman Filter parameters (for Alpha V5)
     kf_process_noise: float = 0.01         # Process noise covariance (lower = smoother)

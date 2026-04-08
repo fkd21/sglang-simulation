@@ -14,10 +14,13 @@ from request.request import SimReq
 class JsonlTraceLoader:
     """Loads requests from JSONL spec files.
 
-    Expected JSONL format (one JSON object per line):
+    Supported JSONL formats (one JSON object per line):
         {"input_len": 1, "output_len": 2312}
+        {"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [...]}
 
-    All requests arrive at time 0.
+    If a "timestamp" field is present (milliseconds), arrival times are computed
+    relative to the first record's timestamp and converted to seconds.
+    Otherwise all requests arrive at time 0.
     """
 
     def __init__(self, trace_path: str):
@@ -27,36 +30,59 @@ class JsonlTraceLoader:
 
     def load(self) -> List[SimReq]:
         requests = []
+        start_time_ms = None
+
         with open(self.trace_path, 'r') as f:
             for idx, line in enumerate(f):
                 line = line.strip()
                 if not line:
                     continue
                 entry = json.loads(line)
+
+                # Support input_length/output_length (mooncake) and input_len/output_len (legacy)
+                context_tokens = entry.get("input_length", entry.get("input_len"))
+                generated_tokens = entry.get("output_length", entry.get("output_len"))
+
+                # Parse timestamp (milliseconds) relative to first record
+                if "timestamp" in entry:
+                    ts_ms = entry["timestamp"]
+                    if start_time_ms is None:
+                        start_time_ms = ts_ms
+                    arrival_time = (ts_ms - start_time_ms) / 1000.0
+                else:
+                    arrival_time = 0.0
+
                 req = SimReq(
                     rid=f"req_{idx}",
-                    arrival_time=0.0,
-                    context_tokens=entry["input_len"],
-                    generated_tokens=entry["output_len"]
+                    arrival_time=arrival_time,
+                    context_tokens=context_tokens,
+                    generated_tokens=generated_tokens
                 )
                 requests.append(req)
 
         print(f"Loaded {len(requests)} requests from {self.trace_path.name}")
-        print(f"All requests arrive at t=0.0s")
+        if start_time_ms is not None:
+            print(f"Time range: 0.0s to {requests[-1].arrival_time:.2f}s")
+        else:
+            print(f"All requests arrive at t=0.0s")
         print(f"Avg context tokens: {sum(r.context_tokens for r in requests) / len(requests):.1f}")
         print(f"Avg generated tokens: {sum(r.generated_tokens for r in requests) / len(requests):.1f}")
         return requests
 
 
 class TraceLoader:
-    """Loads Azure LLM inference traces from CSV.
+    """Loads LLM inference traces from CSV.
 
-    Expected CSV format:
-    TIMESTAMP,ContextTokens,GeneratedTokens
+    Supported CSV formats:
 
-    Example:
-    2023-11-16 18:17:03,4808,10
-    2023-11-16 18:17:04,110,27
+    Azure format:
+        TIMESTAMP,ContextTokens,GeneratedTokens
+        2023-11-16 18:17:03,4808,10
+
+    BurstGPT format:
+        Timestamp,Request tokens,Response tokens
+        0.0,906,446
+        1.329768,36,29
     """
 
     def __init__(self, trace_path: str):
@@ -80,33 +106,39 @@ class TraceLoader:
 
         with open(self.trace_path, 'r') as f:
             reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+
+            if 'TIMESTAMP' in fieldnames:
+                fmt = 'azure'
+            elif 'Timestamp' in fieldnames:
+                fmt = 'burstgpt'
+            else:
+                raise ValueError(f"Unknown CSV format, columns: {fieldnames}")
 
             for idx, row in enumerate(reader):
-                # Parse timestamp (handles microseconds with 7 digits)
-                timestamp_str = row['TIMESTAMP'].strip()
+                if fmt == 'azure':
+                    # Parse datetime timestamp (handles microseconds with 7 digits, and ISO 'T' separator)
+                    timestamp_str = row['TIMESTAMP'].strip().replace('T', ' ')
+                    if '.' in timestamp_str:
+                        parts = timestamp_str.split('.')
+                        microseconds = parts[1][:6]
+                        timestamp_str = f"{parts[0]}.{microseconds}"
+                        timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+                    else:
+                        timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                    if start_time is None:
+                        start_time = timestamp
+                    arrival_time = (timestamp - start_time).total_seconds()
+                    context_tokens = int(row['ContextTokens'])
+                    generated_tokens = int(row['GeneratedTokens'])
+                else:  # burstgpt: Timestamp is float seconds
+                    ts = float(row['Timestamp'])
+                    if start_time is None:
+                        start_time = ts
+                    arrival_time = ts - start_time
+                    context_tokens = int(row['Request tokens'])
+                    generated_tokens = int(row['Response tokens'])
 
-                # Azure timestamps have 7-digit microseconds, Python supports 6
-                if '.' in timestamp_str:
-                    parts = timestamp_str.split('.')
-                    # Truncate microseconds to 6 digits
-                    microseconds = parts[1][:6]
-                    timestamp_str = f"{parts[0]}.{microseconds}"
-                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
-                else:
-                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-
-                # Set start time from first request
-                if start_time is None:
-                    start_time = timestamp
-
-                # Calculate arrival time in seconds from start
-                arrival_time = (timestamp - start_time).total_seconds()
-
-                # Parse token counts
-                context_tokens = int(row['ContextTokens'])
-                generated_tokens = int(row['GeneratedTokens'])
-
-                # Create request
                 req = SimReq(
                     rid=f"req_{idx}",
                     arrival_time=arrival_time,
@@ -159,8 +191,101 @@ class WorkloadDriver:
         return self.requests
 
 
+class StreamingJsonlTraceLoader:
+    """Streams JSONL traces without loading the entire file into memory.
+
+    Supports mooncake format (timestamp in milliseconds, input_length, output_length)
+    and legacy format (input_len, output_len, no timestamp → arrival_time=0).
+
+    Yields requests in time-ordered chunks for windowed loading.
+    """
+
+    def __init__(self, trace_path: str):
+        self.trace_path = Path(trace_path)
+        if not self.trace_path.exists():
+            raise FileNotFoundError(f"Trace file not found: {trace_path}")
+
+        self._file_handle = None
+        self._start_time_ms = None
+        self._last_row_index = -1
+        self._peek_buffer: Optional[Tuple[SimReq, float]] = None
+        self._trace_exhausted = False
+
+    def open(self):
+        if self._file_handle is not None:
+            return
+        self._file_handle = open(self.trace_path, 'r')
+
+    def close(self):
+        if self._file_handle:
+            self._file_handle.close()
+            self._file_handle = None
+
+    def _parse_line(self, line: str) -> Tuple[SimReq, float]:
+        entry = json.loads(line)
+        context_tokens = entry.get("input_length", entry.get("input_len"))
+        generated_tokens = entry.get("output_length", entry.get("output_len"))
+
+        if "timestamp" in entry:
+            ts_ms = entry["timestamp"]
+            if self._start_time_ms is None:
+                self._start_time_ms = ts_ms
+            arrival_time = (ts_ms - self._start_time_ms) / 1000.0
+        else:
+            arrival_time = 0.0
+
+        self._last_row_index += 1
+        req = SimReq(
+            rid=f"req_{self._last_row_index}",
+            arrival_time=arrival_time,
+            context_tokens=context_tokens,
+            generated_tokens=generated_tokens
+        )
+        return req, arrival_time
+
+    def stream_window(self, start_time: float, end_time: float) -> Iterator[SimReq]:
+        if self._file_handle is None:
+            raise RuntimeError("Must call open() before stream_window()")
+
+        if self._peek_buffer is not None:
+            req, arrival_time = self._peek_buffer
+            self._peek_buffer = None
+            if start_time <= arrival_time < end_time:
+                yield req
+            elif arrival_time >= end_time:
+                self._peek_buffer = (req, arrival_time)
+                return
+
+        if self._trace_exhausted:
+            return
+
+        for line in self._file_handle:
+            line = line.strip()
+            if not line:
+                continue
+            req, arrival_time = self._parse_line(line)
+            if arrival_time >= end_time:
+                self._peek_buffer = (req, arrival_time)
+                return
+            if arrival_time < start_time:
+                continue
+            yield req
+
+        self._trace_exhausted = True
+
+    def get_statistics(self) -> dict:
+        return {
+            "start_time_ms": self._start_time_ms,
+            "last_row_index": self._last_row_index,
+            "trace_exhausted": self._trace_exhausted
+        }
+
+
 class StreamingTraceLoader:
-    """Streams Azure LLM inference traces from CSV without loading entire file.
+    """Streams LLM inference traces from CSV without loading entire file.
+
+    Supports Azure format (TIMESTAMP datetime, ContextTokens, GeneratedTokens)
+    and BurstGPT format (Timestamp float seconds, Request tokens, Response tokens).
 
     Yields requests in time-ordered chunks for windowed loading.
     Designed to handle large traces (millions of requests) without OOM.
@@ -178,6 +303,7 @@ class StreamingTraceLoader:
 
         self._file_handle = None
         self._csv_reader = None
+        self._format = None  # 'azure' or 'burstgpt', detected on open()
         self._start_time = None
         self._last_row_index = -1
         self._peek_buffer: Optional[Tuple[SimReq, float]] = None  # (request, arrival_time)
@@ -190,6 +316,13 @@ class StreamingTraceLoader:
 
         self._file_handle = open(self.trace_path, 'r')
         self._csv_reader = csv.DictReader(self._file_handle)
+        fieldnames = self._csv_reader.fieldnames or []
+        if 'TIMESTAMP' in fieldnames:
+            self._format = 'azure'
+        elif 'Timestamp' in fieldnames:
+            self._format = 'burstgpt'
+        else:
+            raise ValueError(f"Unknown CSV format, columns: {fieldnames}")
 
     def close(self):
         """Close CSV file handle."""
@@ -207,31 +340,29 @@ class StreamingTraceLoader:
         Returns:
             Tuple of (SimReq object, arrival_time in seconds)
         """
-        # Parse timestamp (handles microseconds with 7 digits)
-        timestamp_str = row['TIMESTAMP'].strip()
+        if self._format == 'azure':
+            # Parse datetime timestamp (handles microseconds with 7 digits, and ISO 'T' separator)
+            timestamp_str = row['TIMESTAMP'].strip().replace('T', ' ')
+            if '.' in timestamp_str:
+                parts = timestamp_str.split('.')
+                microseconds = parts[1][:6]
+                timestamp_str = f"{parts[0]}.{microseconds}"
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+            else:
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+            if self._start_time is None:
+                self._start_time = timestamp
+            arrival_time = (timestamp - self._start_time).total_seconds()
+            context_tokens = int(row['ContextTokens'])
+            generated_tokens = int(row['GeneratedTokens'])
+        else:  # burstgpt: Timestamp is float seconds
+            ts = float(row['Timestamp'])
+            if self._start_time is None:
+                self._start_time = ts
+            arrival_time = ts - self._start_time
+            context_tokens = int(row['Request tokens'])
+            generated_tokens = int(row['Response tokens'])
 
-        # Azure timestamps have 7-digit microseconds, Python supports 6
-        if '.' in timestamp_str:
-            parts = timestamp_str.split('.')
-            # Truncate microseconds to 6 digits
-            microseconds = parts[1][:6]
-            timestamp_str = f"{parts[0]}.{microseconds}"
-            timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
-        else:
-            timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-
-        # Set start time from first request
-        if self._start_time is None:
-            self._start_time = timestamp
-
-        # Calculate arrival time in seconds from start
-        arrival_time = (timestamp - self._start_time).total_seconds()
-
-        # Parse token counts
-        context_tokens = int(row['ContextTokens'])
-        generated_tokens = int(row['GeneratedTokens'])
-
-        # Create request
         self._last_row_index += 1
         req = SimReq(
             rid=f"req_{self._last_row_index}",
@@ -328,7 +459,7 @@ class StreamingWorkloadDriver:
         # Streaming loader
         path = Path(trace_path)
         if path.suffix == '.jsonl':
-            raise NotImplementedError("Streaming JSONL not yet implemented. Use CSV traces.")
+            self.loader = StreamingJsonlTraceLoader(trace_path)
         else:
             self.loader = StreamingTraceLoader(trace_path)
 

@@ -56,6 +56,14 @@ class PolicyMonitor:
         alpha_v5_threshold_high: float = 1.0,
         alpha_v5_allow_decode_to_prefill: bool = True,
         alpha_v5_allow_prefill_to_decode: bool = True,
+        # Alpha V6 policy params (allocatable-ratio-based memory guard)
+        alpha_v6_threshold_low: float = 0.6,
+        alpha_v6_threshold_high: float = 1.0,
+        alpha_v6_allow_decode_to_prefill: bool = True,
+        alpha_v6_allow_prefill_to_decode: bool = True,
+        decode_allocatable_low: float = 0.2,
+        decode_allocatable_high: float = 0.6,
+        num_reserved_decode_tokens: int = 512,
         # Kalman Filter params (for Alpha V5)
         kf_process_noise: float = 0.01,
         kf_measurement_noise: float = 0.1,
@@ -103,7 +111,8 @@ class PolicyMonitor:
         """
         self.policy = policy
         self.monitor_interval_s = monitor_interval_s
-        self.enabled = policy in ["alpha", "alpha_v2", "alpha_v3", "alpha_v4", "alpha_v5", "v1", "throughput"]
+        self.enabled = policy in ["alpha", "alpha_v2", "alpha_v3", "alpha_v4", "alpha_v5", "alpha_v6", "v1", "throughput"]
+        self.num_reserved_decode_tokens = num_reserved_decode_tokens
         self.slo_target = slo_target
 
         # Initialize policy implementation
@@ -198,6 +207,23 @@ class PolicyMonitor:
             )
             from mechanisms.policy_alpha_sim_v5 import PolicyAlphaSimV5
             self._policy_impl = PolicyAlphaSimV5(args)
+        elif policy == "alpha_v6":
+            args = argparse.Namespace(
+                alpha_threshold_low=alpha_v6_threshold_low,
+                alpha_threshold_high=alpha_v6_threshold_high,
+                alpha_allow_decode_to_prefill=alpha_v6_allow_decode_to_prefill,
+                alpha_allow_prefill_to_decode=alpha_v6_allow_prefill_to_decode,
+                decode_memory_low=decode_memory_low,
+                decode_allocatable_low=decode_allocatable_low,
+                stable_evals=stable_evals,
+                global_cooldown_s=global_cooldown_s,
+                per_worker_cooldown_s=per_worker_cooldown_s,
+                min_decode=min_decode,
+                min_prefill=min_prefill,
+                idle_scrapes=idle_scrapes,
+            )
+            from mechanisms.policy_alpha_sim_v6 import PolicyAlphaSimV6
+            self._policy_impl = PolicyAlphaSimV6(args)
         elif policy == "v1":
             args = argparse.Namespace(
                 stable_evals=stable_evals,
@@ -352,9 +378,9 @@ class PolicyMonitor:
             # PrefillInstance specific
             metrics["num_prefill_inflight_queue_reqs"] = len(instance.inflight_queue)
             metrics["num_prefill_prealloc_queue_reqs"] = 0  # Prefill doesn't have prealloc queue yet
-            # Compute max_alpha from waiting queue using real SGLang definition:
-            # alpha_i = cumulative_vit / (SLO - waiting_time - transfer_time)
-            max_alpha = 0.0
+            # One pass: collect per-request cumulative alphas, derive max_alpha and p95_alpha.
+            # alpha_i = cumulative_vit_i / (SLO - waiting_time_i - transfer_time_i)
+            alpha_list = []
             cumulative_vit = 0.0
             for req in instance.waiting_queue:
                 num_prefill_tokens = req.context_tokens - req.prefill_tokens_done
@@ -362,23 +388,44 @@ class PolicyMonitor:
                 transfer_time = 1.86683e-6 * num_prefill_tokens
                 waiting_time = max(0.0, current_time - req.arrival_time)
                 budget = self.slo_target - waiting_time - transfer_time
-
                 cumulative_vit += vit
                 if budget > 0:
-                    alpha = cumulative_vit / budget
-                    max_alpha = max(max_alpha, alpha)
+                    alpha_list.append(cumulative_vit / budget)
                 else:
-                    # Already past SLO deadline
-                    max_alpha = float("inf")
-                    break
+                    alpha_list.append(float("inf"))
+                    break  # subsequent requests also inf
+            if not alpha_list:
+                max_alpha = 0.0
+                p95_alpha = 0.0
+            else:
+                max_alpha = max(alpha_list)
+                alpha_list.sort()  # inf floats to end naturally
+                idx = 0.95 * (len(alpha_list) - 1)
+                lower = int(idx)
+                upper = min(lower + 1, len(alpha_list) - 1)
+                weight = idx - lower
+                # weight==0.0 guard: avoids inf * 0.0 = nan (IEEE 754)
+                p95_alpha = (alpha_list[lower] if weight == 0.0
+                             else alpha_list[lower] * (1 - weight) + alpha_list[upper] * weight)
             metrics["max_alpha"] = max_alpha
+            metrics["p95_alpha"] = p95_alpha
         else:
             # DecodeInstance specific
             metrics["num_decode_transfer_queue_reqs"] = len(instance.transfer_queue)
             metrics["num_decode_prealloc_queue_reqs"] = len(instance.prealloc_queue)
-            # Add memory metrics for v3 policy
+            # Add memory metrics for v3/v4 policy
             metrics["total_kv_tokens"] = instance.token_to_kv_pool.total_kv_tokens
             metrics["free_kv_tokens"] = instance.token_to_kv_pool.available_size()
+            # Allocatable tokens: mirrors _decode_allocatable_tokens() in engine.py
+            # Subtracts virtual prealloc reservations and per-inflight-req reserve
+            num_active_inflight = len(instance.running_batch.reqs) + len(instance.transfer_queue)
+            reserved = self.num_reserved_decode_tokens * num_active_inflight
+            metrics["allocatable_kv_tokens"] = max(
+                0,
+                instance.token_to_kv_pool.available_size()
+                - instance._prealloc_reserved_tokens
+                - reserved,
+            )
 
         return WorkerState(
             port=port,

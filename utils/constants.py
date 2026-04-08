@@ -1,6 +1,24 @@
 """System constants for the P/D-disaggregated LLM inference simulator."""
 
-# Memory configuration (from simulation_rule.md)
+# GPU hardware profiles
+# BYTES_PER_TOKEN is kept consistent (84,876 bytes) so profiling formulas remain valid.
+# total_kv_cache_tokens = int(available_kv_memory_bytes / BYTES_PER_TOKEN)
+GPU_PROFILES = {
+    "A100_40GB": {
+        "total_vram_gb": 40,
+        "model_size_gb": 27,
+        "total_kv_cache_tokens": 164458,   # int((40-27)*1024^3 / 84876)
+    },
+    "A100_80GB": {
+        "total_vram_gb": 80,
+        "model_size_gb": 27,
+        "total_kv_cache_tokens": 670484,   # int((80-27)*1024^3 / 84876)
+    },
+}
+
+DEFAULT_GPU_TYPE = "A100_40GB"
+
+# Memory configuration (from simulation_rule.md) — defaults to A100 40GB
 TOTAL_VRAM_GB = 40
 MODEL_SIZE_GB = 27
 TOTAL_KV_CACHE_TOKENS = 164458

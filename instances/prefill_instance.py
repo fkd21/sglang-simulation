@@ -6,6 +6,7 @@ from typing import List
 
 from instances.base_instance import InstanceType, SimInstance
 from request.request import SimReq
+from utils.constants import TOTAL_KV_CACHE_TOKENS
 
 
 class PrefillInstance(SimInstance):
@@ -16,10 +17,11 @@ class PrefillInstance(SimInstance):
     - inflight_queue: Requests with KV transfer in progress
     """
 
-    def __init__(self, instance_id: str):
+    def __init__(self, instance_id: str, total_kv_tokens: int = TOTAL_KV_CACHE_TOKENS):
         """Initialize prefill instance.
 
         Args:
             instance_id: Instance identifier
+            total_kv_tokens: KV cache capacity in tokens (default: A100 40GB profile)
         """
-        super().__init__(instance_id=instance_id, instance_type=InstanceType.PREFILL)
+        super().__init__(instance_id=instance_id, instance_type=InstanceType.PREFILL, max_kv_tokens=total_kv_tokens)

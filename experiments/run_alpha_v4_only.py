@@ -23,7 +23,7 @@ from core.engine import SimulationEngine
 
 
 # Paths
-AZURE_TRACE_1H = Path(__file__).resolve().parent.parent / "azure_mixed_24h_30pct.csv"
+AZURE_TRACE_1H = Path(__file__).resolve().parent.parent / "synthetic_challenge_90min.jsonl"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
@@ -166,8 +166,8 @@ def experiment_alpha_v4_only(max_workers: Optional[int] = None) -> List[Dict]:
 
     tasks = []
 
-    # Add baseline configurations (no policy, no switching)
-    print("\n[SETUP] Configuring baseline configurations (no policy)")
+    # # Add baseline configurations (no policy, no switching)
+    # print("\n[SETUP] Configuring baseline configurations (no policy)")
 
     # # Baseline 1: 6p2d
     # config = SimConfig(
@@ -214,10 +214,60 @@ def experiment_alpha_v4_only(max_workers: Optional[int] = None) -> List[Dict]:
     #     {"policy": "none", "offload_mode": "no_offload"},
     # ))
     # print(f"  [2/2] Added: baseline_5p3d (no policy, no switching)")
+    
+    
+    # # Baseline 1: 7p1d
+    # config = SimConfig(
+    #     trace_path=trace,
+    #     num_prefill_instances=7,
+    #     num_decode_instances=1,
+    #     enable_switching=False,  # No switching
+    #     switch_policy="none",    # No policy
+    #     enable_dynamic_lp=False,
+    #     # Enable streaming loading to avoid OOM
+    #     enable_streaming_loading=True,
+    #     streaming_window_size=300.0,  # 5 minutes
+    #     streaming_lookback=60.0,       # 1 minute safety buffer
+    #     # Enable monitoring and periodic plots
+    #     enable_monitoring=True,
+    #     monitoring_plot_interval_minutes=60.0,
+    # )
+    # tasks.append((
+    #     config,
+    #     "baseline_7p1d",
+    #     {"policy": "none", "offload_mode": "no_offload"},
+    # ))
+    # print(f"  [1/2] Added: baseline_7p1d (no policy, no switching)")
+
+    # # Baseline 2: 1p7d
+    # config = SimConfig(
+    #     trace_path=trace,
+    #     num_prefill_instances=1,
+    #     num_decode_instances=7,
+    #     enable_switching=False,  # No switching
+    #     switch_policy="none",    # No policy
+    #     enable_dynamic_lp=False,
+    #     # Enable streaming loading to avoid OOM
+    #     enable_streaming_loading=True,
+    #     streaming_window_size=300.0,  # 5 minutes
+    #     streaming_lookback=60.0,       # 1 minute safety buffer
+    #     # Enable monitoring and periodic plots
+    #     enable_monitoring=True,
+    #     monitoring_plot_interval_minutes=60.0,
+    # )
+    # tasks.append((
+    #     config,
+    #     "baseline_1p7d",
+    #     {"policy": "none", "offload_mode": "no_offload"},
+    # ))
+    # print(f"  [2/2] Added: baseline_1p7d (no policy, no switching)")
+
+
 
     # Only test alpha_v4 policy (no other policies)
     policies = [
-        ("alpha_v4", True, "alpha_v4"),
+        # ("none",False,"none")
+        #("alpha_v4", True, "alpha_v4"),
     ]
     print(f"\n[CONFIG] Testing alpha_v4 policy only")
     print(f"[CONFIG] Each configuration will be tested with 3 offload modes")
@@ -231,8 +281,8 @@ def experiment_alpha_v4_only(max_workers: Optional[int] = None) -> List[Dict]:
         # 1. Without offload (baseline)
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=4,
-            num_decode_instances=4,
+            num_prefill_instances=6,
+            num_decode_instances=2,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
             alpha_v4_allow_decode_to_prefill=True,  
@@ -256,8 +306,8 @@ def experiment_alpha_v4_only(max_workers: Optional[int] = None) -> List[Dict]:
         # 2. With offload, NO decode protection
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=4,
-            num_decode_instances=4,
+            num_prefill_instances=6,
+            num_decode_instances=2,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
             alpha_v4_allow_decode_to_prefill=True, 
@@ -284,8 +334,8 @@ def experiment_alpha_v4_only(max_workers: Optional[int] = None) -> List[Dict]:
         # 3. With offload, WITH decode protection
         config = SimConfig(
             trace_path=trace,
-            num_prefill_instances=4,
-            num_decode_instances=4,
+            num_prefill_instances=6,
+            num_decode_instances=2,
             enable_switching=enable_sw,
             switch_policy=sw_policy,
             alpha_v4_allow_decode_to_prefill=True,  # CRITICAL: Enable decode→prefill

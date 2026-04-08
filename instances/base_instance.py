@@ -78,10 +78,14 @@ class SimInstance:
     available_kv_memory: int = AVAILABLE_KV_MEMORY_BYTES
     max_kv_tokens: int = TOTAL_KV_CACHE_TOKENS
 
-    # Memory pools
+    # Memory pools (initialized in __post_init__ using max_kv_tokens)
     req_to_token_pool: SimReqToTokenPool = field(default_factory=SimReqToTokenPool)
     token_to_kv_pool: SimTokenToKVPool = field(default_factory=SimTokenToKVPool)
     tree_cache: SimRadixCache = field(default_factory=SimRadixCache)
+
+    def __post_init__(self):
+        # Ensure token_to_kv_pool reflects max_kv_tokens (handles non-default GPU profiles)
+        self.token_to_kv_pool = SimTokenToKVPool(self.max_kv_tokens)
 
     # State
     busy: bool = False

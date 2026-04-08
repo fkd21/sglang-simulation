@@ -14,6 +14,7 @@ from core.event import Event, EventType
 from instances.base_instance import InstanceType
 from instances.decode_instance import DecodeInstance
 from instances.instance_manager import InstanceManager
+from utils.constants import GPU_PROFILES, DEFAULT_GPU_TYPE
 from instances.prefill_instance import PrefillInstance
 from metrics.metrics_collector import MetricsCollector, SimulationResults
 from metrics.time_series_monitor import TimeSeriesMonitor
@@ -71,9 +72,12 @@ class SimulationEngine:
             self.workload_driver = WorkloadDriver(config.trace_path)
             self.streaming_enabled = False
 
+        gpu_type = getattr(config, 'gpu_type', DEFAULT_GPU_TYPE)
+        gpu_profile = GPU_PROFILES[gpu_type]
         self.instance_manager = InstanceManager(
             num_prefill=config.num_prefill_instances,
             num_decode=config.num_decode_instances,
+            total_kv_tokens=gpu_profile["total_kv_cache_tokens"],
         )
         self.metrics_collector = MetricsCollector()
         self.policy = PolicyController(config)
@@ -108,6 +112,14 @@ class SimulationEngine:
             alpha_v5_threshold_high=config.alpha_v5_threshold_high,
             alpha_v5_allow_decode_to_prefill=config.alpha_v5_allow_decode_to_prefill,
             alpha_v5_allow_prefill_to_decode=config.alpha_v5_allow_prefill_to_decode,
+            # Alpha V6 params
+            alpha_v6_threshold_low=config.alpha_v6_threshold_low,
+            alpha_v6_threshold_high=config.alpha_v6_threshold_high,
+            alpha_v6_allow_decode_to_prefill=config.alpha_v6_allow_decode_to_prefill,
+            alpha_v6_allow_prefill_to_decode=config.alpha_v6_allow_prefill_to_decode,
+            decode_allocatable_low=config.decode_allocatable_low,
+            decode_allocatable_high=config.decode_allocatable_high,
+            num_reserved_decode_tokens=config.num_reserved_decode_tokens,
             # Kalman Filter params
             kf_process_noise=config.kf_process_noise,
             kf_measurement_noise=config.kf_measurement_noise,
@@ -427,14 +439,16 @@ class SimulationEngine:
             num_dropped = len(self.metrics_collector.dropped_requests)
 
             # Deadlock detection: check if simulation time is advancing but no work is being done
-            # This catches cases where requests are stuck in queues forever
+            # This catches cases where requests are stuck in queues forever.
+            # In streaming mode, skip this check until the trace is exhausted: a gap in
+            # arrivals (e.g. bursty trace) is not a deadlock — new requests are still coming.
             current_total_processed = completed + num_dropped
             if current_total_processed > self._last_total_processed:
                 # Progress made, update tracking
                 self._last_active_time = self.current_time
                 self._last_total_processed = current_total_processed
-            else:
-                # No progress, check if we've been stuck too long
+            elif not self.streaming_enabled or trace_exhausted:
+                # No progress; only check for deadlock when trace is fully loaded
                 time_since_progress = self.current_time - self._last_active_time
                 if time_since_progress > 300.0:  # 300 simulation seconds (5 minutes) without any completion/drop
                     # Check if there are requests stuck in queues
