@@ -29,7 +29,7 @@ from core.engine import SimulationEngine
 
 
 # Paths
-AZURE_TRACE_1H = Path(__file__).resolve().parent.parent / "kartik_syn_2.csv"
+AZURE_TRACE_1H = Path(__file__).resolve().parent.parent / "synthetic_30min_v5_pure.csv"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
@@ -231,28 +231,28 @@ def experiment_alpha_v6_only(max_workers: Optional[int] = None) -> List[Dict]:
     ))
     print(f"  [1/2] Added: baseline_4p4d (no policy, no switching)")
 
-    # Baseline 2: 1p7d
-    config = SimConfig(
-        trace_path=trace,
-        num_prefill_instances=1,
-        num_decode_instances=7,
-        enable_switching=False,  # No switching
-        switch_policy="none",    # No policy
-        enable_dynamic_lp=False,
-        # Enable streaming loading to avoid OOM
-        enable_streaming_loading=True,
-        streaming_window_size=300.0,  # 5 minutes
-        streaming_lookback=60.0,       # 1 minute safety buffer
-        # Enable monitoring and periodic plots
-        enable_monitoring=True,
-        monitoring_plot_interval_minutes=60.0,
-    )
-    tasks.append((
-        config,
-        "baseline_1p7d",
-        {"policy": "none", "offload_mode": "no_offload"},
-    ))
-    print(f"  [2/2] Added: baseline_1p7d (no policy, no switching)")
+    # # Baseline 2: 1p7d
+    # config = SimConfig(
+    #     trace_path=trace,
+    #     num_prefill_instances=2,
+    #     num_decode_instances=6,
+    #     enable_switching=False,  # No switching
+    #     switch_policy="none",    # No policy
+    #     enable_dynamic_lp=False,
+    #     # Enable streaming loading to avoid OOM
+    #     enable_streaming_loading=True,
+    #     streaming_window_size=300.0,  # 5 minutes
+    #     streaming_lookback=60.0,       # 1 minute safety buffer
+    #     # Enable monitoring and periodic plots
+    #     enable_monitoring=True,
+    #     monitoring_plot_interval_minutes=60.0,
+    # )
+    # tasks.append((
+    #     config,
+    #     "baseline_1p7d",
+    #     {"policy": "none", "offload_mode": "no_offload"},
+    # ))
+    # print(f"  [2/2] Added: baseline_1p7d (no policy, no switching)")
 
 
 
@@ -327,7 +327,7 @@ def experiment_alpha_v6_only(max_workers: Optional[int] = None) -> List[Dict]:
             enable_dynamic_lp=True,
             enable_decode_protection=True,
             tpot_sla=0.1,
-            budget_scaling_factor=2,
+            budget_scaling_factor=1,
             slo_target=1.0,
             lp_max_window_size=20,
             enable_streaming_loading=True,

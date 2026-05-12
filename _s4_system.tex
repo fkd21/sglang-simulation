@@ -1,0 +1,570 @@
+\section{System Design}
+\label{sec:design}
+
+\subsection{Overall Architecture}
+\label{subsec:overall-arch}
+
+\jiahuan{@Minjia, @Kartik, @Kaidi, maybe we can give the prefill/decode instance new names to shows they take the hybrid workload, such as first-stage/second-stage instance? ``Prefill/decode instance'' gives a hint that they only compute prefill/decode tokens.}
+
+\name is a disaggregated LLM serving system built on top of SGLang that adapts to dynamic workload variations. \name features two complementary mechanisms:
+
+\noindent
+\textbf{\instance}: A fast worker-local mechanism that allows a request's prefill work to be partially offloaded to decode workers. This fluid token division is achieved through dynamic workload partitioning per-request, and SLA-aware batch size control. Consequently, \instance effectively mitigates transient workload spikes caused by sudden surges in request rates or extremely long prefill contexts.
+
+\noindent
+\textbf{\cluster}: A cluster-level mechanism that rebalances prefill/decode capacity by switching worker roles under sustained imbalance. This effectively updates the global P:D ratio to match the sustained workload demand.
+
+\name coordinates these mechanisms through a unified control signal, the \textit{Prefill Pressure Index} (PPI).
+\instance is evaluated on prefill workers
+every scheduling round and offloads tokens to decode workers whenever the PPI policy
+predicts TTFT violations, and decode capacity is available.
+\cluster operates at a slower timescale, aggregating pressure signals over time and triggering role switching only when imbalance persists.
+\fref{fig:overall-arch} shows the overall architecture.
+The control plane consists of the router and controller, while the data plane consists of the modified prefill and decode worker pools.
+The router assigns each request to a prefill/decode worker pair and maintains the current worker-role mapping.
+Workers continuously export local pressure signals to the controller, which determines whether to invoke \cluster for cluster-wide rebalancing.
+
+\kartik{figure can be improved}
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\columnwidth]{figs/epd-arch.drawio.pdf}
+    \caption{Overall Architecture of \name. Each request is first sent to prefill instance for first stage computation, then sent to decode instance (with their generated KV cache) for the following computation. The workload division between two instance is }
+    \label{fig:overall-arch}
+\end{figure}
+
+\noindent
+\jiahuan{TODO: add state machine figure} \kartik{What state machine are you referring to?}
+
+\subsection{Prefill Pressure Index (PPI)}
+\label{subsec:metric-ppi}
+
+\jiahuan{@Minjia, @Kartik, I give metric $\alpha$ the name Prefill Pressure Index (PPI), do you think it's Okay?}
+
+Prior work relies on metrics such as latency~\cite{}, KV cache utilization~\cite{}, batch size~\cite{}, throughput~\cite{}, and queue length~\cite{} to quantify workload pressure.
+However, these indicators are either insufficiently responsive to transient spikes or serve as lagging metrics that only capture overload and SLO violations after they have already occurred.
+To address these limitations, we propose a novel metric, \textit{Prefill Pressure Index} (PPI), that uniformly guides both \cluster and \instance.
+
+\kartik{Explain the key idea of PPI}
+
+In a disaggregated architecture, the KV cache generated during the prefill phase must be transferred to a decode instance for the subsequent autoregressive generation.
+Following the convention of existing systems like vLLM~\cite{kwon2023pagedattention} and SGLang~\cite{zheng2023sglang}, this transfer latency is accounted in the TTFT.
+Therefore, a request can meet TTFT SLO only if its prefill execution and KV-cache transfer both complete before the TTFT SLO expires. This allows us to construct a  virtual deadline for the prefill computation of the request.
+
+For a request $R_i$ with prefill length $N_i$ and arrival
+time $T^{\text{arr}}_i$, define $S^P$ as the TTFT SLO, $T^P(N_i)$ as the prefill compute time, and
+$T^{\text{xfer}}(N_i)$ as the time required to transfer KV cache of $N_i$ tokens\footnote{}.  The virtual deadline $D_i$ is defined as:
+\begin{equation}
+    D_i = T^{\text{arr}}_i + S^P - T^{\text{xfer}}(N_i).
+    \label{eq:virtual-deadline}
+\end{equation}
+
+Therefore, for the request to meet the TTFT SLO, we require:
+\begin{equation}
+    T^P(N_i) \le D_i - T^{\text{arr}}_i.
+    \label{eq:prefill-compute-time}
+\end{equation}
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\columnwidth]{figs_new/waterfall.drawio.pdf}
+    \caption{Timeline of prefill requests ($R_1$ to $R_4$, their prefill lengths are $N_1$ to $N_4$) and Virtual Deadlines ($D_1$ to $D_4$). \jiahuan{@Kartik, I redefine $D_i$ as deadline instead of budget. Previous definition seems a little confusing combining with our figure} \jiahuan{TODO: explain the bottom row is to show the scheduling}}
+    \label{fig:timeline-prefill}
+\end{figure}
+
+Furthermore, requests naturally vary in their prefill lengths.
+To accurately quantify their computational ``pressure'' to the prefill instance, we convert their prefill length $N_i$ to \textit{Virtual Inference Time} (VIT), denoted as $T^P(N_i)$.
+To formulate this, we assume that prefill computation is primarily compute-bound and that its execution time scales approximately linearly with the total number of prefill tokens in a batch (i.e., $T^P(\cdot)$ is a linear function).
+
+\kartik{Show the profiling figure}
+
+With the Virtual Deadline (VD) and Virtual Inference Time (VIT) established, we can formally define \textit{SLO Schedulability}. For a set of pending prefill requests $\{R_1, \dots, R_i\}$ sorted by ascending VDs ($D_1 \le \dots \le D_i$), this set is considered SLO schedulable if there exists an execution order where $\forall k\le i$, $R_k$ completes its prefill computation before its corresponding deadline $D_k$.
+
+\kartik{We should mention that batch size is 1 for prefill instance, so the prefill execution is serial.}
+\fref{fig:timeline-prefill} illustrates this. The horizontal length of each request represents its corresponding VIT. Since prefill is compute-bound, the prefill execution is serial as the batch size is 1.
+
+\kartik{Do we need to explain this or can we just specify the formula?}
+\kartik{Need to think whether R2, R1 is a possible execution order in some cases where our greedy algorithm does not account for it.}
+$R_1$ alone is SLO schedulable.
+However, the combined set $\{R_1, R_2\}$ is not.
+If the system executes $R_1$ first, $R_2$ will miss its deadline; conversely, if it prioritizes $R_2$, $R_1$ will violate its SLO.
+This unschedulability arises because $\{R_1, R_2\}$ places excessive computational pressure on the prefill instance.
+Specifically, the total required VIT for both requests exceeds the time available before the deadline $D_2$, formulated as:
+\begin{equation}
+    T^P(N_1) + T^P(N_2) > D_2 - T^{\text{now}}
+\end{equation}
+Similarly, $\{R_1, R_2, R_3\}$ and $\{R_1, \dots, R_4\}$ are also unschedulable.
+
+To continuously monitor and mathematically quantify this workload pressure, we introduce the \textit{Prefill Pressure Index} (PPI).
+For request sequence $\{R_1, \dots, R_i\}$, PPI is defined as:
+\begin{equation}
+    PPI_i = \frac{\sum_{k=1}^{i}{T^P(N_k)}}{D_i - T^{\text{now}}}
+\end{equation}
+This metric provides a precise and responsive for system load.
+Formally, if $\exists i$ such that $PPI_i > 1$, the prefill instance is overloaded, inevitably leading to a TTFT SLO violation.
+Conversely, if $\forall i, PPI_i \le 1$, the workload remains strictly schedulable, ensuring that the prefill instance can successfully manage all TTFT deadlines.
+
+\subsection{\instance}
+\label{subsec:instance-level}
+
+\subsubsection{Motivation}
+\label{subsubsec:instance-level-motivation}
+
+\jiahuan{If we put \instance before \cluster, we cannot claim ``where auto-scaling might not be sufficiently responsive'' here. Need to discuss later}
+
+\jiahuan{currently I only talk about prefill token on the decode instance. Decode token on the prefill instance can be added later if necessary.}
+
+In a standard full P/D disaggregation architecture, workloads are statically partitioned.
+Prefill tokens execute strictly on prefill instances, while decode tokens run exclusively on decode instances. However, as established by our metric before, this rigid separation becomes a critical bottleneck during short-term workload spikes.
+Specifically, when $\exists i, PPI_i > 1$, the pending requests are no longer SLO schedulable on the prefill pool alone, making TTFT violations inevitable.
+
+To prevent these imminent violations, a natural mitigation strategy is to leverage available compute resources in the decode pool to ``absorb'' a portion of the prefill workload.
+While conceptually straightforward, this idea introduces a complex scheduling challenge: the system must precisely determine when to trigger this cross-pool offloading and dynamically decide exactly which prefill tokens should be migrated to the decode instances.
+
+
+
+
+% \subsubsection{Motivation and Definition}
+% \begin{itemize}
+%     \item In P/D disaggregation, requests are statically partitioned across workers. Prefill tokens strictly run on prefill instances and decode tokens run on decode instances.
+%     \item Work stealing dynamically adjusts the number of tokens processed on Prefill and Decode workers based on real-time SLO attainment.
+%     \item Work stealing can leverage under-utilized capacity on both Prefill and Decode workers during short-term workload spikes, where auto-scaling might not be sufficiently responsive.
+% \end{itemize}
+
+\subsubsection{Request Division}
+
+To restore SLO schedulability during these transient spikes, our objective is to dynamically offload a portion of the prefill workload to the decode instances.
+Formally, for a given request $R_i$, we define the \textit{offload ratio} $\beta_i \in [0, 1]$, which dictates that exactly $\beta_i N_i$ prefill tokens are redirected to the decode pool.
+As illustrated in \fref{fig:beta-def}, the request is sequentially partitioned: the initial $(1-\beta_i) N_i$ tokens are computed on the prefill instance, and the subsequent $\beta_i N_i$ tokens are offloaded for computation on the decode instance.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\columnwidth]{figs_new/beta-def.drawio.pdf}
+    \caption{Offload ratio $\beta$.}
+    \label{fig:beta-def}
+\end{figure}
+
+\kartik{Do we need to ensure this? Even if we have some "cut-in", I don't think there will be significant TPOT misses.}\\ 
+\kaidi{Yes, this is why we don't add queuing time(queuing for decode to have space) in TTFT.}
+Assuming that there is at least one decode worker whose batch is not fully utilized, SGLang's prefill first policy will ensure that the prefill request will be executed immediately.
+\jiahuan{I agree we should mention it. I'm finding a good place to include this paragraph}
+
+The problem then reduces to finding a set of offload ratios $\{\beta_i\}_{i=1}^n$ that successfully restores SLO schedulability.
+To model this, let $T^{P\to D}(N)$ denote the time required for a \textit{decode} instance to process $N$ prefill tokens.
+Intuitively, we have $T^{P\to D}(N)\ge T^P(N)$, as decode instance has the interference from the running decode requests.
+Consequently, we must redefine the Virtual Deadline (VD) for each request $R_i$.
+We define $D_i^\prime$ as the \textit{adjusted} deadline by which the prefill instance must finish computing its assigned $(1-\beta_i) N_i$ tokens.
+This updated deadline of this $\beta_i$-divided request is formulated as:
+\begin{equation}
+    D_i^\prime = T^{\text{arr}}_i + S^P - T^{\text{xfer}}\left((1-\beta_i)N_i\right) - T^{P\to D}(\beta_i N_i)
+\end{equation}
+Similarly, we define \textit{adjusted} PPI as:
+\begin{equation}
+    PPI_i^\prime = \frac{\sum_{k=1}^{i}{T^P((1-\beta_k)N_k)}}{D_i^\prime - T^{\text{now}}}
+\end{equation}
+Intuitively, increasing the offload ratio $\beta_i$ simultaneously decreases $T^P((1-\beta_i)N_i)$ and $D_i^\prime$.
+Because both the required compute time and the available time window shrink, the precise mathematical relationship between $PPI_i^\prime$ and $\{\beta_i\}_{i=1}^n$ is non-trivial. \jiahuan{TODO: need to refine this paragraph for better description accuracy}
+Nevertheless, we can characterize this dynamic through qualitative analysis.
+As Figure \fref{fig:timeline-prefill-beta} illustrates, partially offloading prefill tokens for requests $R_1$, $R_2$, and $R_4$ to the decode pool (indicated by the yellow blocks) effectively reduces the workload.
+Consequently, the remaining tokens on the prefill instance (blue blocks) experience significantly less compute pressure.
+This substantial reduction in cumulative execution time alleviates the prefill bottleneck, which intuitively yields a lower adjusted PPI and restores SLO schedulability.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\columnwidth]{figs_new/timeline-prefill-beta.drawio.pdf}
+    \caption{Timeline of prefill requests with token offloading.}
+    \label{fig:timeline-prefill-beta}
+\end{figure}
+
+For \instance, we can solve the following optimization problem to get $\{\beta_i\}_{i=1}^n$:
+\begin{align}
+    \min\ \ & \sum_{i=1}^n \beta_i N_i \\
+    \text{s.t.}\ \ & PPI^\prime_i \le 1, \forall i \in \{1,2,\cdots,n\}
+\end{align}
+
+In each scheduling round, \instance only examines a bounded prefix of the waiting queue and solves a budget-aware version of the above problem.
+The implementation assumes the following linear latency models, derived from the profiling methodology and measurements described in the profiling discussion below:
+\begin{equation}
+    T^P(N) = b_p + a_pN,
+\end{equation}
+\begin{equation}
+    T^{P\to D}(N; B^D, C^D) = b_d + a_dN + \gamma B^D + \delta C^D,
+\end{equation}
+where $B^D$ and $C^D$ denote the current decode batch size and decode computed-token sum, respectively.
+Let $\lambda$ denote the KV-transfer time coefficient, such that $T^{\mathrm{xfer}}(N)=\lambda N$.
+The key structural condition is that the effective per-token cost of running prefill on a decode instance is no smaller than that on a prefill instance, i.e.,
+\begin{equation}
+    \frac{\partial T^{P\to D}(N; B^D, C^D)}{\partial N}
+    \ge
+    \frac{\partial T^P(N)}{\partial N}.
+\end{equation}
+Equivalently, $a_d \ge a_p$.
+Under this condition, offloading a token from an earlier request $R_j$ can only relax the TTFT constraints of requests $R_i$ with $i\ge j$, and never those of requests $i<j$.
+Consequently, the constraint matrix is lower triangular: each $\beta_j$ only appears in the constraints of its own request and later requests.
+For the current request $R_i$, increasing $\beta_i$ yields the net deficit-reduction coefficient
+\begin{equation}
+    k \triangleq a_p + \lambda - a_d.
+\end{equation}
+When $k>0$, the resulting structure admits an exact greedy forward-substitution solver, which always prioritizes earlier requests because each unit of offload assigned to $R_j$ reduces the cumulative prefill load of all later prefixes at rate $a_pN_j$.
+If $k\le 0$, increasing the current request's own offload ratio no longer relaxes its TTFT constraint, so the $j=i$ update is skipped.
+
+Besides the TTFT constraints on the prefill side, \instance also enforces a decode-side offload budget so that the added mixed prefill work does not violate the decode TPOT SLO.
+Let the current decode TPOT estimate be
+\begin{equation}
+    \hat{t}^{D}_{\mathrm{iter}} = b_d + \gamma B^D + \delta C^D.
+\end{equation}
+If $\hat{t}^{D}_{\mathrm{iter}} \ge S^D$, the decode side has no slack and offloading is disabled.
+Otherwise, the TPOT slack can be converted to a per-iteration token budget:
+\begin{equation}
+    U_{\mathrm{iter}} = \frac{S^D - \hat{t}^{D}_{\mathrm{iter}}}{a_d}.
+\end{equation}
+Let $N_{\max}^{P}$ be the maximum prefill tokens in one scheduling round.
+The estimated duration of such a prefill round is
+\begin{equation}
+    T^P_{\max} = b_p + a_pN_{\max}^{P},
+\end{equation}
+which overlaps with approximately
+\begin{equation}
+    n_{\mathrm{iter}} = \frac{T^P_{\max}}{S^D}
+\end{equation}
+decode iterations.
+Therefore, the final decode-side offload budget is
+\begin{equation}
+    U
+    =
+    U_{\mathrm{iter}}
+    \cdot n_{\mathrm{iter}}
+    \cdot \frac{|\mathcal{D}|}{|\mathcal{P}|}
+    \cdot \eta,
+\end{equation}
+where $|\mathcal{D}|/|\mathcal{P}|$ converts single-instance slack to cluster-wide decode capacity, and $\eta$ is a configurable scaling factor.
+The complete online decision procedure is presented later in Algorithm~\ref{alg:instance}, which combines this decode-side budget with the TTFT feasibility constraints to compute the offload ratios $\{\beta_i\}$ in each scheduling round.
+In Algorithm~\ref{alg:instance}, $N_i$ and $T_i^{\mathrm{arr}}$ denote the prefill length and arrival time of request $R_i$, respectively.
+We use $M_i=\sum_{m=1}^{i}N_m$ to denote the cumulative prefill tokens in the first $i$ requests, and $q_i=\max(T^{\mathrm{ready}},T_i^{\mathrm{arr}})-T_i^{\mathrm{arr}}$ to denote the queueing delay seen by $R_i$ before prefill starts.
+The term $C_i=(i+1)b_p+a_pM_i+\lambda N_i+D(B^D,C^D)$ is the constant part of the $i$-th TTFT constraint under zero additional offloading, where $D(B^D,C^D)=b_d+\gamma B^D+\delta C^D$, and $\Delta_i$ is the remaining deficit of that constraint after accounting for the currently assigned offload ratios.
+During the greedy update, $U_{\mathrm{used}}$ tracks the decode budget already consumed, $\rho$ is the deficit-reduction rate of the current decision variable, and $\xi$ is the maximum feasible increment of the selected offload ratio under the TTFT deficit, box constraint, and remaining decode budget.
+
+\begin{algorithm}[t]
+\small
+\caption{\instance: Budget-Aware Partial Prefill Offloading}
+\label{alg:instance}
+\begin{algorithmic}[1]
+\Require bounded waiting window $W=\langle R_1,\dots,R_n\rangle$, prefill-ready time $T^{\mathrm{ready}}$, decode budget $U$, decode-side cost term $D(B^D,C^D)$, TTFT SLO $S^P$
+\Ensure offload ratios $\{\beta_i\}_{i=1}^n$
+\State $\beta_i \gets 0,\ \forall i$; $U_{\mathrm{used}} \gets 0$; feasible $\gets \textsc{True}$
+\State $M_i \gets \sum_{m=1}^{i} N_m,\ \forall i$
+\State $q_i \gets \max(T^{\mathrm{ready}}, T_i^{\mathrm{arr}}) - T_i^{\mathrm{arr}},\ \forall i$
+\State $k \gets a_p + \lambda - a_d$
+\For{$i \gets 1$ to $n$}
+    \State $C_i \gets (i+1)b_p + a_pM_i + \lambda N_i + D(B^D,C^D)$
+    \State $\Delta_i \gets C_i - (S^P - q_i) - \left(a_p\sum_{m=1}^{i-1}\beta_m N_m + k\beta_i N_i\right)$
+    \For{$j \gets 1$ to $i$}
+        \If{$\Delta_i \le 0$ or $U_{\mathrm{used}} \ge U$}
+            \State \textbf{break}
+        \EndIf
+        \If{$j=i$ and $k \le 0$}
+            \State \textbf{continue}
+        \EndIf
+        \State $\rho \gets a_pN_j$ if $j<i$, else $kN_i$
+        \State $\xi \gets \min\!\left\{\frac{\Delta_i}{\rho},\ 1-\beta_j,\ \frac{U-U_{\mathrm{used}}}{N_j}\right\}$
+        \State $\beta_j \gets \beta_j + \max(0,\xi)$
+        \State $\Delta_i \gets \Delta_i - \rho\max(0,\xi)$
+        \State $U_{\mathrm{used}} \gets U_{\mathrm{used}} + N_j\max(0,\xi)$
+    \EndFor
+    \If{$\Delta_i > 0$}
+        \State feasible $\gets \textsc{False}$
+    \EndIf
+\EndFor
+\State $\beta_i \gets \min\{1,\max\{0,\beta_i\}\},\ \forall i$
+\State $\beta_i \gets 0$ for all $\beta_i < \epsilon_\beta$
+\State \Return $\{\beta_i\}_{i=1}^n$, feasible
+\end{algorithmic}
+\end{algorithm}
+
+
+\subsection{\cluster}
+\label{subsec:cluster-level}
+
+\clearpage
+
+% \subsubsection{Work Stealing Policy}
+% \noindent\\
+% We model the capacity of Prefill workers to process requests within the SLA to estimate whether workers are under-utilized or over-utilized.\\
+% \textbf{Definitions}\\
+% For each request on the prefill instance, define: \begin{itemize}
+%     \item TTFT SLO $S^P$, ITL SLO $S^D$
+%     \item $t_{\text{prefill}}$: the time that it takes to complete prefill of the request.
+%     \item $t_{\text{wait}}$: waiting time, defined as $t_\text{now} - t_{\text{arrival}}$
+%     \item $t_{\text{xfer}}$ - $P \rightarrow D$ KV cache transfer time. Modeled using NVLink bandwidth and KV cache size to be transferred.
+%     \item $L^P$: prefill length 
+%     \item $t_{\text{decode\_overhead}}$ - Decode Scheduling Overhead. In SGLang, the first token is output on the decode instance, after prefill and transfer completes. This is the additional time request spends on the decode instance.
+% \end{itemize}
+% Using these, we may define the ttft as,
+% $$ttft = t_{\text{wait}} + t_{\text{prefill}} + t_{\text{transfer}} + t_{\text{d}}$$
+% \\
+% Define the \textbf{virtual prefill budget} as the maximum time available to complete prefill to meet the TTFT SLO.
+% $$B = S^P - t_{\text{wait}} - t_{\text{xfer}} - t_{\text{d}}$$
+% Due to SGLang's explicit handshake, requests are immediately scheduled on the decode after transfer, $\rightarrow t_{\text{d}} \approx 0$ \\
+% $$B = S^P - t_{\text{wait}} - t_{\text{xfer}}$$
+% It follows that for this request to meet the SLA $S_P$, we must ensure: $$t_\text{prefill} \leq B$$\\
+% Define, VIT (Virtual Inference Time) as the prefill inference time modeled using $L^P$ from \autoref{fig:prefilltime-vs-token}.
+% \textbf{It converts the prefill length to virtual time consumption}.
+% $$t_\text{prefill} \approx VIT(L^P)$$\\
+% \textbf{Scheduling Algorithm}\\
+% When we run our work-stealing scheduler, for each request $R_i$ we calculate its Prefill budget $B_i$ and VIT $VIT_i$.\\
+% The deadline of a request, $D_i$ is defined as the timestamp by which the request must be completed to meet its SLA. 
+% $$D_i = B_i + Arrival_i$$\\
+% To satisfy the TTFT SLO, each request's prefill must complete within its budget: $t_{\text{prefill},i} \le B_i$.\\
+% Since the prefill instance runs at batch size 1, prefill execution is serial.\\
+% Approximating prefill time by VIT yields the feasibility constraint
+% \[
+%   \sum_{j=1}^{i} VIT(L_j) \le B_i,
+% \]
+% which motivates defining a normalized ``pressure'' \\
+% \begin{figure}[ht]
+%   \centering
+%   \includegraphics[width=\columnwidth]{figs/waterfall_inverted.pdf}
+%   \caption{Prefill requests arrive at $A_i$ with deadlines $D_i$. The length of the request indicates the number of prefill tokens.}
+%   \label{fig:waterfall_inverted}
+% \end{figure}
+% Define the \textbf{pressure metric} $\alpha$ as:
+% $$ \alpha_i = \cfrac{\sum_{j=1}^{i} VIT(L_j)}{B_i}$$
+% \\
+% For a concrete example, consider \autoref{fig:waterfall_inverted} that shows 4 requests on a requests on a Prefill worker.\\
+% $\forall R_i$ define $\alpha_i$ as:
+% $$\alpha_1 = \cfrac{VIT(L_1)}{B_1}$$
+% $$\alpha_2 = \cfrac{VIT(L_1)+VIT(L_2)}{B_2}$$
+% $$\alpha_3 = \cfrac{VIT(L_1)+VIT(L_2) + VIT(L_3)}{B_3}$$
+% $$\alpha_4 = \cfrac{VIT(L_1)+VIT(L_2) + VIT(L_3)+VIT(L_4)}{B_4}$$
+% \\ \\
+
+% \begin{itemize}
+%     \item If $\exists\alpha > 1 \rightarrow$ prefill worker is \textbf{overloaded}. We can offload some prefill work to decode instance to meet SLA.
+%     \item $\forall\alpha \le 1 \rightarrow$ prefill worker is \textbf{underutilized}. We can offload some decode work to prefill instance while meeting SLA.
+% \end{itemize}
+% \textbf{Prefill Work Stealing}\\
+
+% We define a prefill-division ratio $\beta_i \in [0,1] \forall R_i$, such that the remaining $(1-\beta_i)$ fraction of prefill can be executed on a decode instance. (\autoref{fig:beta-outline}).
+% \begin{figure}[!ht]
+%     \centering
+%     \includegraphics[width=0.7\columnwidth]{figs/beta.pdf}
+%     \caption{Definition of $\beta_i$}
+%     \label{fig:beta-outline}
+% \end{figure}
+% \\
+\kartik{Do we need to ensure this? Even if we have some "cut-in", I don't think there will be significant TPOT misses.}\\ 
+\kaidi{Yes, this is why we don't add queuing time(queuing for decode to have space) in TTFT.}
+Assuming that there is at least one decode worker whose batch is not fully utilized, SGLang's prefill first policy will ensure that the prefill request will be executed immediately.\\
+Thus, the new prefill computation time of a $\beta$-divided request is 
+$$VIT((1-\beta_i) L_i) + DT(\beta_iL_i)$$
+where the $VIT(\cdot)$ is the prefill forward time on prefill instance, and the $DT(\cdot)$ means the prefill running time on the decode instance.\\
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\columnwidth]{figs/PonD_inverted.pdf}
+    \caption{Waterfall illustration of request timing and deadline adjustment. $A$ denotes the request arrival time, $D$ denotes the original deadline of the request, and $D'$ denotes the adjusted deadline that triggers the start of transfer, ensuring the SLO is met.}
+    \label{fig:waterfall-update-outline}
+\end{figure}
+\\
+After partitioning, to meet SLO, the deadline on prefill instance is adjusted to:
+$$D^\prime = D - DT(\beta_iL_i)$$
+Here we assume the total transfer time is not affected by partitioning.\\
+\kartik{This is not entirely true, but due to overlapped transfers the actual transfer difference might be negligible. We can evaluate.}
+\\
+\kaidi{Yes, the total transfer KV cache should be the same, may have small differences.}
+\jiahuan{clarified in the new version}
+
+We can solve the following optimization problem \\
+\begin{align}
+    \min\ \ &\sum \beta_i L_i \\
+    \text{s.t.}\ \alpha_i^\prime \le 1
+\end{align}
+
+Then we get the work stealing divisions $\beta_i$.\\
+
+% \textbf{Decode Work Stealing(Abandoned For the current project) }\\
+% \textbf{When}: Prefill instance is not fully utilized, and Decode instance is busy. \\
+% We can let prefill instance to continue decode generation. Since prefill is not fully utilized, we can use chunked prefill to make sure Decode SLA is not violated.\\
+% \kartik{Should we re-use $DT$ here, since that indicates prefill time on decode worker. What we are referring to here is Decode time on prefill worker. Or are they both same since it is a mixed worker in both cases.}
+% \kaidi{Yes, I am indicating they are the same mixed batch profiling}
+% \begin{equation}
+%     DT\!\left(\texttt{max\_chunked\_prefill\_len}\right) \le \mathrm{ITL}\_{\mathrm{SLO}}
+% \end{equation}
+
+% \kartik{I think we need more design here.}
+% \kartik{TODO: Perform prefill-v-decode memory estimation motivating example.}
+% \begin{figure}[!ht]
+%     \centering
+%     \includegraphics[width=\columnwidth]{figs/DonP_inverted.pdf}
+%     \caption{decode tokens on the prefill instance.The figure shows how the prefill chunk size should be controlled when batching with decode request to meet ITL SLO }
+%     \label{fig:decode-on-prefill-outline}
+% \end{figure}
+
+\subsubsection{Profiling}
+\label{subsubsec:instance-profiling}
+\textbf{Purpose of Profiling.}\\
+We aim to derive $DT(\cdot)$, the per-step inference time when \emph{decode batches} and \emph{prefill requests} are processed concurrently. For a fixed GPU configuration, we model $DT$ as a function of:
+\begin{itemize}
+    \item total prefill tokens
+    \item number of prefill requests
+    \item decode batch size
+    \item total decode computed tokens (context tokens during decode)
+\end{itemize}
+\noindent\\
+\kartik{Why do we include number of prefill requests in modelling, if it does not show up in the final equation?}\\
+\kaidi{It's hard to control this variable, I am struggling to prove it has no effect}\\
+\textbf{Method: } We instrument per-step latency with CUDA events and log token-level counters, then run controlled SGLang mixed-batching experiments and fit $DT(\cdot)$ using stable-step measurements across a sweep of decode batch sizes and prefill lengths.\\
+\textbf{Result:} $DT$ can be formulated as:
+\[
+DT(t)
+= k_1 \, P(t)
++ k_2 \, B_d(t)
++ k_3 \, C_d(t)
++c,
+\]
+
+\[
+\begin{aligned}
+P(t) &:= \text{total prefill tokens up to time } t,\\
+B_d(t) &:= \text{decode batch size at time } t,\\
+C_d(t) &:= \text{total decode computed tokens up to time } t.
+\end{aligned}
+\]
+
+ 
+% \textbf{Purpose of Profiling:} Our goal is to determine the formulation of $DT()$, which represents the single-step inference time when concurrently processing decode batches and prefill requests. We assume that, for a specific GPU configuration, $DT$ is primarily influenced by the following factors:\\
+% 1.Total input prefill tokens. \\
+% 2.Number of prefill requests. \\
+% 3.Decode batch size. \\
+% 4.Total decode computed tokens (total context tokens during the decode phase).
+
+% To quantify these relationships and derive the formula for $DT$, we propose the following profiling methods:
+
+% 1.Add CUDA events to track the start and end times of each inference step. Also monitor token counts: computed tokens for decode requests, and compute tokens for all requests. Clearly label each request in the batch as decode or prefill.
+
+% 2. For the sglang server, we enable mixed chunking, so decode and prefill can be batched together. We set schedule conservativeness to 0, so the scheduler will batch tokens together more aggressively.
+% And we set \textbf{ max-prefill-tokens = chunked-prefill-size = decode-batch-size + desired-prefill-tokens}. Since a decode request contributes 1 compute token per step, the number of additional prefill tokens added at each step will match our target, i.e., desired-prefill-tokens.
+
+% 3.For the SGLang benchmark, we set the request rate high enough that all requests are issued at roughly the same time. We also enable new benchmark features so that the number of requests, input length, and output length can be configured individually via a JSON file. Finally, \textbf{we send (30 + decode-output-len) prefill requests to ensure that each step has enough prefill requests available.}
+
+% 4. For metrics extraction: We only extract steps where both the decode batch size and the prefill token count are stable.
+% We extract decode computed token and inference time for each step. We experiment with decode bs [4,8,16,32,64,128,256,384,512] and prefill input length [128,256,512,1024,2048,4096,8192]. \kaidi{todo, check if prefill request num and len distribution have effects}
+
+
+\subsection{Auto-scaling}
+\minjia{We need some discussion here. Either we have three-level mechanism: work-stealing, p/d ratio adjustment, auto-scaling, or just having the first two (with the key message that we don't need to always resort to auto-scaling). I think we all know we want eventually to have 3-tier system, but that seems to enlarge the solution space significantly and my concern is that it will spread ourselves too think to evaluate any design choice in depth. The problem space becomes a lot cleaner if we define the problem as optimizations with fixed GPUs. I can think of another paper where we have 3-tier system + more advanced control logic that determines when to use what actuator to meet SLOs, but that seems to be a big project on its own. Alternatively, we can lightly touch on autoscaling saying that the system supports auto-scaling. There are pros and cons on each side. Thoughts? }\\
+\kartik{Our motivating examples are short-term and mid-term workload variations that can be met by adjustments without autoscaling. I suggest we can focus on the first 2 techniques, show that we can meet SLAs, and touch on autoscaling lightly.}
+\minjia{Sounds good. Can you adjust the section title and structure accordingly to align with what we discussed? We do need a component to connect the two mechanisms. They look disconnected. }
+\subsubsection{Motivation}
+\begin{itemize}
+    \item Work-stealing can absorb short-term variations. However, when workload significantly shifts, the P:D ratio needs to be adjusted.
+    \item Roles in SGLang are static. Changing P:D ratio requires re-starting the cluster. This takes several minutes and causes down-time.
+    \item Autoscaling new instances also takes time, and requires additional resources that might not be available immediately.
+    \item We implement a novel role-switching mechanism in SGLang, with a monitor and a router component, to scale prefill and decode workers to counter long-term workload shifts.
+    \item If additional resources are available, our mechanism can also leverage them to scale out to new workers.
+\end{itemize}
+\subsubsection{Always-on Role-Switching}
+\kartik{Add a diagram here to showcase the extended state machine.}
+\begin{itemize}
+  \item Originally, SGLang Prefill and Decode workers are fixed in their roles.
+  \item We implement a new, zero-downtime, role-switching mechanism to switch worker roles.
+  \item The mechanism adds three states to the worker state machine: \textsc{DRAIN}, \textsc{SWITCH}, and \textsc{ACTIVE}.
+  \item Role Switching works as follows:
+  \begin{itemize}
+    \item Enter \textsc{DRAIN} when a switch is requested: reject new requests, finish in-flight ones, and discard not-yet-started requests.
+    \item Move to \textsc{SWITCH}: re-provision the worker with the new role, reusing model weights for fast switching.
+    \item Enter \textsc{ACTIVE}: resume accepting new requests under the new role.
+  \end{itemize}
+  \item The switching time is typically a few seconds for Prefill workers, and up to 10 seconds for Decode workers, since active decode requests take longer to complete. \kartik{We can make this faster, if needed. For eg. KV cache can be re-computed on another worker.}
+\end{itemize}
+
+\subsubsection{Monitor}
+\noindent\\
+
+The monitor in \cluster directly uses the PPI-derived signal exported by each prefill worker.
+Let $\hat{\alpha}=\max_{w\in\mathcal{P}}\mathrm{P95Alpha}(w)$ denote the cluster-wide peak prefill pressure across all prefill workers $\mathcal{P}$.
+For decode workers $\mathcal{D}$, we track two distinct memory signals:
+\begin{equation}
+    \bar{u}^{D} = \frac{1}{|\mathcal{D}|}\sum_{w\in\mathcal{D}}\left(1-\frac{\mathrm{FreeKV}(w)}{\mathrm{TotalKV}(w)}\right),
+\end{equation}
+\begin{equation}
+    \bar{r}^{D} = \frac{1}{|\mathcal{D}|}\sum_{w\in\mathcal{D}}\frac{\mathrm{AllocKV}(w)}{\mathrm{TotalKV}(w)}.
+\end{equation}
+Here, $\bar{u}^{D}$ is the average raw KV-cache utilization, while $\bar{r}^{D}$ is the average allocatable-KV ratio after subtracting reserved capacity.
+\cluster proposes a decode$\rightarrow$prefill switch when prefill pressure remains high, i.e., $\hat{\alpha}>\tau_{\mathrm{high}}$, and decode utilization remains low, i.e., $\bar{u}^{D}<\theta_{\mathrm{mem}}$, for several consecutive evaluations.
+Conversely, it proposes a prefill$\rightarrow$decode switch when prefill pressure remains low, i.e., $\hat{\alpha}<\tau_{\mathrm{low}}$, but the allocatable decode memory becomes tight, i.e., $\bar{r}^{D}<\theta_{\mathrm{alloc}}$, for several consecutive evaluations.
+
+\begin{algorithm}[t]
+\small
+\caption{\cluster: Alpha-Led Role Switching with Stability and Cooldown Guards}
+\label{alg:cluster}
+\begin{tabular}{@{}r p{0.9\linewidth}@{}}
+\multicolumn{2}{@{}l@{}}{\textbf{Input:} worker states, thresholds $(\tau_{\mathrm{low}}, \tau_{\mathrm{high}}, \theta_{\mathrm{mem}}, \theta_{\mathrm{alloc}})$,} \\
+\multicolumn{2}{@{}l@{}}{\hspace*{1.8em}stability horizon $K$, global cooldown $T_g$, per-worker cooldown $T_w$} \\
+\multicolumn{2}{@{}l@{}}{\textbf{Output:} either \textsc{NoOp} or a role-switch proposal} \\
+1: & Filter out workers without valid telemetry; partition the remaining workers into prefill set $\mathcal{P}$ and decode set $\mathcal{D}$. \\
+2: & Compute $\hat{\alpha} \leftarrow \max_{w\in\mathcal{P}}\mathrm{P95Alpha}(w)$, $\bar{u}^{D}$, and $\bar{r}^{D}$. \\
+3: & Set $c_{d\rightarrow p} \leftarrow (\hat{\alpha}>\tau_{\mathrm{high}})\land(\bar{u}^{D}<\theta_{\mathrm{mem}})$. \\
+4: & Set $c_{p\rightarrow d} \leftarrow (\hat{\alpha}<\tau_{\mathrm{low}})\land(\bar{r}^{D}<\theta_{\mathrm{alloc}})$. \\
+5: & Update the two stability counters: increment only the counter of the unique satisfied direction, and reset both counters otherwise. \\
+6: & If the previous proposal was issued within $T_g$, return \textsc{NoOp}. \\
+7: & If $c_{d\rightarrow p}$ has remained stable for at least $K$ evaluations: \\
+   & \hspace*{1.8em}abort if $|\mathcal{D}| \le N_{\mathrm{decode}}^{\min}$; otherwise select a decode worker not in cooldown, \\
+   & \hspace*{1.8em}preferring workers that have been idle for the last $K$ scrapes, then smaller running-request count, \\
+   & \hspace*{1.8em}then smaller decode-side queue score $(N_{\mathrm{transfer}} + N_{\mathrm{prealloc}} + N_{\mathrm{queue}})$. \\
+8: & \hspace*{1.8em}Set its per-worker cooldown to $T_w$, reset both stability counters, and return a decode$\rightarrow$prefill proposal. \\
+9: & Else if $c_{p\rightarrow d}$ has remained stable for at least $K$ evaluations: \\
+   & \hspace*{1.8em}abort if $|\mathcal{P}| \le N_{\mathrm{prefill}}^{\min}$; otherwise select a prefill worker not in cooldown, \\
+   & \hspace*{1.8em}preferring workers that have been idle for the last $K$ scrapes, then smaller running-request count, \\
+   & \hspace*{1.8em}then smaller prefill-side queue score $(N_{\mathrm{inflight}} + N_{\mathrm{prealloc}} + N_{\mathrm{queue}})$. \\
+10: & \hspace*{1.8em}Set its per-worker cooldown to $T_w$, reset both stability counters, and return a prefill$\rightarrow$decode proposal. \\
+11: & Otherwise, return \textsc{NoOp}. \\
+\end{tabular}
+\end{algorithm}
+
+
+\subsubsection{Router}
+\noindent\\
+The router acts as the worker-facing control plane.
+\minjia{Modern llm inference engine usually supports prefix-aware routing. Therefore, if we just say "routing", it would immediately trigger people to think how this router behaves wrt prefix-aware routing. You may need to revise the wording to avoid that confusion.}
+\begin{itemize}
+  \item Routes each request to an appropriate Prefill/Decode worker pair.
+  \item Load-balances by selecting the least-loaded Prefill--Decode pair, using the pressure metrics as the load signal.
+  \item Tracks the current membership and roles of workers.
+  \item Collects and reports metrics to the monitor.
+  \item Relays switch decisions made by the monitor to workers and updates membership after transitions complete.
+  \item Routes requests discarded by draining workers to another worker and prioritizes them to avoid re-queueing and reduce tail latency.
+  \item Supports \textbf{request stealing}. When a worker becomes available after a role switch, migrate not-yet-started requests from overloaded workers to underloaded worker to reduce queueing delay.
+\end{itemize}
+\kartik{We can consider extending SGLang's load-balanced router instead of maintaining a separate implementation if it helps our case.}
+
+\minjia{The design is lacking in two aspects: (1) the two mechanisms are presented as if they are separate designs (no system glue layer to combine the two). If that's really the case, we should consider split the work into two papers. To synergistically combine the two, we need a control layer (actually non-trivial to build but it can be simple, e.g., best-effort to try to do work stealing and then falls back to P/D ratio adjustment if work stealing does not mitigate SLO violations)  (2) (Full) autoscaling is included but is extremely thin (no actual mechanism and not to mention it makes the controlling layer much complicated to design).  }
+
+\minjia{I also realize that there is an abuse of the term "autoscaling". P/D ratio reassignment is not equivalent to autoscaling. Let's unify the term so no ambiguity. Autoscaling: instance addition/deletion from the GPU serving pool. P/D role reassignment: fixed GPU serving pool size and only changing the P/D ratio. P/D role assignment can be done offline (restart) or online (always-on). Clear?}
+
+\kartik{Agreed on both. First, we do have some promising results that we can use persistent short-term policy violations as an indicator for switching. This should glue the two-level control.
+
+Second, In this outline, I incorrectly used "auto-scale" where I meant P:D ratio adjustment. Thanks for the observation, I will resolve it.}
+\subsection{Evaluation}
+
+\minjia{We need a main results section that shows the integrated benefits of the system. Not evaluation piece-by-piece (If that's the case, we might just split this into two papers). }
+
+\subsubsection{Work Stealing}
+\noindent\\
+For different models (8B, 30B, 70B) and different datasets (azure-code, azure-conv, burstGPT, mini-reasoning) measure:
+\begin{itemize}
+    \item Goodput at increasing QPS.
+    \item Serving Capacity
+    \item Goodput trend over time for a bursty dataset (burstGPT)
+\end{itemize}
+\jiahuan{Can add more details here.}
+\subsubsection{Autoscaling}
+\begin{itemize}
+\item{Llama 8B world-size = 8, shifting workload azure-conv to mini-reasoning. \name meets SLA attainment for both workloads, whereas no static configuration is able to meet.}
+\item{Repeat experiment for larger models, and datasets.}
+% \item{Llama 8B expanding world size. Spin up new instances to meet workload shift.}
+\item{Test larger models With Tensor Parallelism}
+\item{Compare against Dynamo as a baseline, which can only bring up new workers.}
+
+\minjia{Autoscaling here is confusing. Do you mean P/D ratio reassignment? They are not different. Similarly, if you include true autoscaling in the design, then people expect detailed evaluation of autoscaling. If so, how are you going to design experiments to show that? If it is P/D ratio reassingment,  on which scale are we going to show the evaluation results to make it confusing?}
+
+\end{itemize}

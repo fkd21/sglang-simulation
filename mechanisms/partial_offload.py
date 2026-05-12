@@ -99,8 +99,8 @@ def calculate_decode_offload_budget(
     headroom = tpot_sla - current_tpot
     per_iter_budget = headroom / _PREFILL_COEFF
 
-    # Step 4: Estimate prefill batch time (use 0.5 as average load factor)
-    t_prefill = _PREFILL_INTERCEPT + _PREFILL_COEFF * (0.5 * prefill_max_tokens)
+    # Step 4: Estimate prefill batch time
+    t_prefill = _PREFILL_INTERCEPT + _PREFILL_COEFF * ( prefill_max_tokens)
 
     # Step 5: Calculate number of decode iterations during one prefill batch
     n_iter = t_prefill / tpot_sla
